@@ -1,0 +1,7 @@
+src/.work/
+__pycache__/
+*.pyc
+.env
+.env.*
+.DS_Store
+Thumbs.db
