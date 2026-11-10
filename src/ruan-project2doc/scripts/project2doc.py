@@ -7,7 +7,7 @@
   scaffold       建笔记工程骨架（只新建，不覆盖）
   progress       核对步骤总览与笔记仓产物（只读）
   consistency    跨篇一致性检查（只读）
-  lint           可读性候选扫描（只读，命中只是线索）
+  lint           讲解与表达候选扫描（只读，命中只是线索）
   render-revise  生成修改提示词文档（只新建，不覆盖）
 
 退出码：0 通过；1 存在失败项；2 参数或环境错误。
@@ -44,13 +44,17 @@ BUILD_FILES = {
 }
 STATE_KEYS = ["梳理中模块数", "待验收模块数", "本层完成模块数", "已证叶子模块数", "待办数", "阻塞数", "入口数", "汇点数", "覆盖记录数"]
 HEX = re.compile(r"(?<![0-9A-Za-z])([0-9a-f]{7,40})(?![0-9A-Za-z])")
-SOURCE_PREFIXES = ("源码直取", "借鉴 project-map")
-CHECK_STATES = {"已核实", "推断", "待核实"}
-SUPPLEMENT_LABELS = {"补充说明", "版本差异", "实现限制", "并发情况", "异常情况", "测试证据", "当前限制"}
-M01_PHRASES = ["修正补充", "代码核验说明", "此前理解有误", "重新确认后", "更正：", "更正:", "经核实后发现", "之前写错", "此前写错", "（已修正）"]
-R07_WORDS = ["钉死", "拓扑", "抓手", "闭环", "赋能", "打通", "底层逻辑", "颗粒度", "边界", "兜底逻辑", "心智"]
-R33_PREFIX = re.compile(r"^(为什么|必须|真正|关键是|只需要)")
-R40_PHRASES = ["明确了", "回到正题", "接下来我们", "下面我们来看", "让我们", "综上所述", "值得注意的是", "需要注意的是", "如前所述", "不难看出"]
+SUPPLEMENT_LABELS = {"异常情况", "并发情况", "设计取舍", "版本演进", "当前局限"}
+EDIT_PHRASES = ["修正补充", "代码核验说明", "此前理解有误", "重新确认后", "更正：", "更正:", "经核实后发现", "之前写错", "此前写错", "（已修正）"]
+AI_WORDS = ["钉死", "拓扑", "抓手", "闭环", "赋能", "打通", "底层逻辑", "颗粒度", "兜底逻辑", "心智"]
+SALES_TITLE = re.compile(r"^(必须|真正|关键是|只需要)")
+TRANSITIONS = ["明确了", "回到正题", "接下来我们", "下面我们来看", "让我们", "综上所述", "值得注意的是", "需要注意的是", "如前所述", "不难看出"]
+TAG_THRESHOLD = 5  # 默认值，可按项目口径调整。
+NONCORE_PASS_RATIO = 0.8  # 默认值；脚本只核对审读者已经写下的判定。
+SOURCE_LINE = re.compile(r"[\w./\\-]+\.[A-Za-z0-9]+(?::\d+(?:[-–]\d+)?|#L\d+(?:-L?\d+)?)")
+TEST_NAME = re.compile(r"\b(?:[A-Z][A-Za-z0-9_]*(?:Tests?|Spec)|test_[A-Za-z0-9_]+|test[A-Z][A-Za-z0-9_]*|should[A-Z][A-Za-z0-9_]*)\b")
+PROCESS_NOTE = re.compile(r"本次(?:均)?未运行|尚无真实容器证据|测试未执行|未跑(?:过)?测试|仅静态(?:核对|核查|分析)")
+CROSS_REFERENCE = re.compile(r"(?:参见|详见|见|在)\s*第\s*\d{1,2}\s*篇")
 
 
 # ---------- 基础 ----------
@@ -104,8 +108,8 @@ def strip_code(text: str) -> list[tuple[int, str]]:
             if "-->" in s:
                 comment = False
             continue
-        if s.startswith("<!--") and "-->" not in s:
-            comment = True
+        if s.startswith("<!--"):
+            comment = "-->" not in s
             continue
         out.append((i, line))
     return out
@@ -484,8 +488,15 @@ def cmd_scaffold(a: argparse.Namespace) -> int:
             print(f"git init 失败：{r.stderr}", file=sys.stderr)
             return 2
         created.append(f"{notes}（git init）")
-    for name in ("_勘察结果.md", "_拆分方案.md", "_术语表.md", "_衔接约定.md", "_问题台账.md"):
+    for name in ("00-系统总览与阅读路线.md", "99-复核说明.md"):
+        copy_new(tpls / name, notes / name, created, skipped)
+    for name in ("_勘察结果.md", "_规划方案.md", "_术语表.md", "_衔接约定.md", "_问题台账.md"):
         copy_new(tpls / name, notes / "_工作区" / name, created, skipped)
+    for name in ("_研读", "_审读记录"):
+        directory = notes / "_工作区" / name
+        if not directory.exists():
+            directory.mkdir(parents=True)
+            created.append(str(directory))
     pack = proj / "需求包"
     copy_new(tpls / "需求包-00-任务说明.md", pack / "00-任务说明.md", created, skipped)
     copy_new(tpls / "需求包-02-步骤拆分要求.md", pack / "02-步骤拆分要求.md", created, skipped)
@@ -514,7 +525,7 @@ def note_files(notes: Path) -> dict[str, Path]:
 
 
 def planned_articles(notes: Path) -> list[str]:
-    text = read(notes / "_工作区" / "_拆分方案.md")
+    text = read(notes / "_工作区" / "_规划方案.md")
     t = table_after(section(text, r"篇目") or text, r"篇号")
     nums = []
     for row in t[1:]:
@@ -529,7 +540,7 @@ def article_nums_in_00(notes: Path) -> list[str]:
     f = files.get("00")
     if not f:
         return []
-    t = table_after(section(read(f), r"篇目清单") or "", r"篇号")
+    t = table_after(section(read(f), r"篇目") or read(f), r"篇号")
     out = []
     for row in t[1:]:
         m = re.match(r"^\D*(\d{1,2})\b", row[0]) if row else None
@@ -561,7 +572,7 @@ def cmd_progress(a: argparse.Namespace) -> int:
                 ok.append(f"{sid}：提交 {h} 在笔记仓中")
             else:
                 fails.append(f"{sid}：提交 {h} 不在笔记仓中")
-        kind = re.search(r"(取证|成文|校对|收束)", ln)
+        kind = re.search(r"(研读|成文|审读|收束)", ln)
         num = re.search(r"(?<!\d)(\d{2})(?!\d)", ln[kind.end():]) if kind and kind.group(1) != "收束" else None
         if kind and kind.group(1) == "收束":
             for need in ("00", "99"):
@@ -571,7 +582,7 @@ def cmd_progress(a: argparse.Namespace) -> int:
                 fails.append(f"{sid} 收束已完成，但缺少 修改已有笔记-*.md")
         elif kind and num:
             nn = num.group(1)
-            need = {"取证": work / "_事实" / f"{nn}.md", "成文": files.get(nn), "校对": work / "_校对记录" / f"{nn}.md"}[kind.group(1)]
+            need = {"研读": work / "_研读" / f"{nn}.md", "成文": files.get(nn), "审读": work / "_审读记录" / f"{nn}.md"}[kind.group(1)]
             if not need or not Path(need).is_file():
                 fails.append(f"{sid}（{kind.group(1)} {nn}）已完成，但产物不存在")
             else:
@@ -585,7 +596,7 @@ def cmd_progress(a: argparse.Namespace) -> int:
             if git(notes, "cat-file", "-e", f"{h}^{{commit}}").returncode != 0:
                 fails.append(f"《当前状态》的上一步 checkpoint {h} 不在笔记仓中")
     for nn in planned_articles(notes):
-        have = [n for n, p in (("事实", work / "_事实" / f"{nn}.md"), ("正文", files.get(nn)), ("校对", work / "_校对记录" / f"{nn}.md")) if p and Path(p).is_file()]
+        have = [n for n, p in (("理解稿", work / "_研读" / f"{nn}.md"), ("正文", files.get(nn)), ("审读", work / "_审读记录" / f"{nn}.md")) if p and Path(p).is_file()]
         ok.append(f"第 {nn} 篇现有产物：{'、'.join(have) or '无'}")
     data = {"notes": str(notes), "version_dir": str(vdir), "fail": fails, "warn": warns, "ok": ok}
     lines = [f"失败 {len(fails)}，警告 {len(warns)}"] + [f"FAIL {x}" for x in fails] + [f"WARN {x}" for x in warns] + [f"OK   {x}" for x in ok]
@@ -603,153 +614,222 @@ def code_names(text: str) -> set[str]:
     return names
 
 
+def article_number(value: str) -> str | None:
+    match = re.search(r"(?<!\d)(\d{1,2})(?!\d)", value)
+    return f"{int(match.group(1)):02d}" if match else None
+
+
+def cell(row: list[str], index: int | None) -> str:
+    return re.sub(r"[`*]", "", row[index]).strip() if index is not None and index < len(row) else ""
+
+
+def filled(value: str) -> bool:
+    value = value.strip()
+    return bool(value and value not in {"-", "—", "待填", "待确认", "待核对", "待审读"}
+                and not re.fullmatch(r"<[^>]+>|\{\{.*?\}\}", value))
+
+
+def planned_questions(text: str) -> dict[str, dict[str, dict]]:
+    questions: dict[str, dict[str, dict]] = {}
+    for table in md_tables(text):
+        qi, ni = col(table, r"题号|追问编号"), col(table, r"^篇号")
+        pi, ci = col(table, r"^问题$|^追问$"), col(table, r"核心题")
+        if None in (qi, ni, pi):
+            continue
+        for row in table[1:]:
+            number, qid = article_number(cell(row, ni)), cell(row, qi)
+            if number and filled(qid):
+                questions.setdefault(number, {})[qid] = {
+                    "question": cell(row, pi),
+                    "core": bool(re.search(r"^(是|核心|必答|yes|true)$", cell(row, ci), re.I)),
+                }
+    return questions
+
+
+def check_review(text: str, expected: dict[str, dict]) -> list[str]:
+    """核对审读记录是否齐全；正确性由审读者回源码判断，本函数不判语义。"""
+    problems = []
+    answers: dict[str, dict] = {}
+    for table in md_tables(text):
+        qi, ji = col(table, r"题号|追问编号"), col(table, r"^判定")
+        ai, si, vi = col(table, r"答案"), col(table, r"正文出处"), col(table, r"核对")
+        if qi is None or ji is None:
+            continue
+        for row in table[1:]:
+            qid = cell(row, qi)
+            if not filled(qid):
+                continue
+            if qid in answers:
+                problems.append(f"G1 题号重复：{qid}")
+            answer, source, verified = cell(row, ai), cell(row, si), cell(row, vi)
+            judgement = cell(row, ji)
+            if not all(filled(v) for v in (answer, source, verified)):
+                problems.append(f"G1 {qid} 缺答案、正文出处或正确性核对")
+            if judgement not in {"答得出", "部分", "答不出"}:
+                problems.append(f"G1 {qid} 判定应为 答得出/部分/答不出")
+            # 只读开头的核对结论；后面的业务说明可能包含“错误密码”等正常描述。
+            correct = bool(re.match(r"^(?:正确|一致|核对无误)(?=$|[\s；;，,。.!！?？：:（(])", verified))
+            answers[qid] = {"answered": judgement == "答得出", "correct": correct}
+    if not answers:
+        problems.append("缺少 G1 逐题作答表")
+    for qid, question in expected.items():
+        result = answers.get(qid)
+        if result is None:
+            problems.append(f"G1 漏了规划中的追问 {qid}")
+        elif question["core"] and not (result["answered"] and result["correct"]):
+            problems.append(f"G1 核心题 {qid} 尚未记录为答得出且正确")
+    other = [qid for qid, question in expected.items() if not question["core"]]
+    passed = sum(1 for qid in other if answers.get(qid, {}).get("answered") and answers[qid]["correct"])
+    if other and passed / len(other) < NONCORE_PASS_RATIO:
+        problems.append(f"G1 其余题目答得出且正确 {passed}/{len(other)}，低于默认 {NONCORE_PASS_RATIO:.0%}")
+    gates = {}
+    for table in md_tables(text):
+        gi, ji, ei = col(table, r"质量门"), col(table, r"结论"), col(table, r"依据")
+        if None in (gi, ji, ei):
+            continue
+        for row in table[1:]:
+            match = re.match(r"^(G[1-6])\b", cell(row, gi))
+            if match:
+                gate = match.group(1)
+                if gate in gates:
+                    problems.append(f"质量门 {gate} 重复")
+                gates[gate] = (cell(row, ji), cell(row, ei))
+    for gate in (f"G{i}" for i in range(1, 7)):
+        if gate not in gates:
+            problems.append(f"缺少 {gate} 结论与依据")
+        else:
+            judgement, evidence = gates[gate]
+            if not re.match(r"^通过(?:$|[（(：:；;，, ])", judgement) or not filled(evidence):
+                problems.append(f"{gate} 尚未记录通过及具体依据")
+    return problems
+
+
 def cmd_consistency(a: argparse.Namespace) -> int:
     notes = Path(a.notes).resolve()
+    if not notes.is_dir():
+        print(f"笔记目录不存在：{notes}", file=sys.stderr)
+        return 2
     work = notes / "_工作区"
     fails, warns, ok = [], [], []
     files = note_files(notes)
     articles = {k: v for k, v in files.items() if k not in ("00", "99")}
-
-    # 1. 00 篇目清单与实际文件
-    listed = article_nums_in_00(notes)
-    if "00" in files:
-        missing = [n for n in listed if n not in articles]
-        extra = [n for n in articles if n not in listed]
-        if missing:
-            fails.append(f"00 篇目清单列了，但文件不存在：{', '.join(missing)}")
-        if extra:
-            fails.append(f"文件存在，但 00 篇目清单没有列：{', '.join(extra)}")
-        if not missing and not extra:
-            ok.append(f"00 篇目清单与文件一致（{len(listed)} 篇）")
+    bodies = {nn: read(path) for nn, path in articles.items()}
+    plan = read(work / "_规划方案.md")
     planned = planned_articles(notes)
-    if planned and articles:
-        not_planned = [n for n in articles if n not in planned]
-        if not_planned:
-            warns.append(f"这些篇不在 _拆分方案.md 的篇目表里：{', '.join(not_planned)}")
+    listed = article_nums_in_00(notes)
+    questions = planned_questions(plan)
 
-    # 2. 术语：跨篇出现的源码名应进术语表（K14）
+    # 计划可以先于成文存在；最终收束才要求全部计划篇完成。
+    for nn in files:
+        duplicates = list(notes.glob(f"{nn}-*.md"))
+        if len(duplicates) > 1:
+            fails.append(f"篇号 {nn} 有多个正文文件：{', '.join(p.name for p in duplicates)}")
+    if len(planned) != len(set(planned)):
+        fails.append("_规划方案.md 篇目表有重复篇号")
+    if len(listed) != len(set(listed)):
+        fails.append("00 篇目清单有重复篇号")
+    if articles and not planned:
+        fails.append("已有正文，但 _规划方案.md 没有有效篇目表")
+    if "00" in files:
+        missing = [nn for nn in listed if nn not in articles]
+        extra = [nn for nn in articles if nn not in listed]
+        if missing:
+            (fails if a.final else warns).append(f"00 列出的篇目尚无正文：{', '.join(missing)}")
+        if extra:
+            fails.append(f"正文存在，但 00 篇目清单没有列：{', '.join(extra)}")
+        if planned and set(listed) != set(planned):
+            fails.append("00 篇目清单与 _规划方案.md 的篇目表不一致")
+    elif articles:
+        fails.append("已有正文，但缺少 00 总览")
+    for nn in articles:
+        if nn not in planned:
+            fails.append(f"第 {nn} 篇不在 _规划方案.md 的篇目表中")
+    if a.final:
+        for name in ("_勘察结果.md", "_规划方案.md", "_术语表.md", "_衔接约定.md", "_问题台账.md"):
+            if not read(work / name).strip():
+                fails.append(f"最终收束缺少 _工作区/{name}")
+        for nn in ("00", "99", *planned):
+            if nn not in files:
+                fails.append(f"最终收束缺少第 {nn} 篇")
+        if not planned:
+            fails.append("最终收束没有有效的规划篇目")
+        if not list(notes.glob("修改已有笔记-*.md")):
+            fails.append("最终收束缺少修改提示词文档")
+
+    # 核心机制必须有一个主讲篇；没有写出的计划篇不会被误认作丢失。
+    for table in md_tables(plan):
+        mi, li, pi = col(table, r"^机制$|^机制名称$"), col(table, r"^级别$"), col(table, r"主讲篇")
+        if None in (mi, li, pi):
+            continue
+        for row in table[1:]:
+            name, level = cell(row, mi), cell(row, li)
+            if not filled(name) or level != "核心":
+                continue
+            mains = re.findall(r"(?<!\d)(\d{1,2})(?!\d)", cell(row, pi))
+            if len(mains) != 1:
+                fails.append(f"核心机制“{name}”必须有一个主讲篇")
+            elif f"{int(mains[0]):02d}" not in planned:
+                fails.append(f"核心机制“{name}”的主讲篇不在规划篇目中")
+
+    # 理解稿是段落式交接物。只核对结构，逐条来源和讲解质量仍须人工审读。
+    study_sections = ("流程走查", "机制卡", "关键数据", "追问", "意图", "取证材料|核验材料|核对材料", "细节去向")
+    for nn in articles:
+        study = read(work / "_研读" / f"{nn}.md")
+        review = read(work / "_审读记录" / f"{nn}.md")
+        if not study.strip():
+            fails.append(f"第 {nn} 篇缺少理解稿 _研读/{nn}.md")
+        else:
+            for heading in study_sections:
+                if not section(study, heading):
+                    fails.append(f"_研读/{nn}.md 缺少“{heading}”部分")
+        if not questions.get(nn):
+            fails.append(f"第 {nn} 篇没有规划追问")
+        if not review.strip():
+            fails.append(f"第 {nn} 篇缺少审读记录 _审读记录/{nn}.md")
+        else:
+            fails += [f"_审读记录/{nn}.md：{message}" for message in check_review(review, questions.get(nn, {}))]
+        if study.strip() and review.strip():
+            ok.append(f"第 {nn} 篇理解稿与审读记录均存在（内容仍需人工核对）")
+
+    # 术语候选只提醒读者可能混淆的叫法，不要求每个源码名都收入术语表。
     gloss = read(work / "_术语表.md")
-    gt = table_after(gloss, r"术语")
-    gloss_text = "\n".join(" ".join(r) for r in gt[1:])
-    gloss_terms = []
-    ti = col(gt, r"^术语")
-    for row in gt[1:]:
-        if ti is not None and ti < len(row) and row[ti]:
-            gloss_terms.append(re.sub(r"[`*]", "", row[ti]).strip())
     usage: dict[str, set[str]] = {}
-    bodies = {nn: read(p) for nn, p in articles.items()}
     for nn, body in bodies.items():
-        evidence_cut = body.split("## 证据索引")[0]
-        for n in code_names(evidence_cut):
-            if re.search(r"[/\\]|\.(java|py|ts|js|go|kt|rs|vue|tsx|jsx|sql|xml|ya?ml)\b", n):
-                continue
-            usage.setdefault(n, set()).add(nn)
-    cross = sorted(n for n, s in usage.items() if len(s) >= 2)
-    for n in cross:
-        if n not in gloss_text:
-            warns.append(f"源码名 `{n}` 出现在第 {', '.join(sorted(usage[n]))} 篇（跨篇），但不在 _术语表.md（K14）")
-    if bodies and gloss_terms:
-        all_text = "\n".join(bodies.values())
-        for t in gloss_terms:
-            if t and t not in all_text:
-                warns.append(f"术语表词条“{t}”没有出现在任何一篇正文里")
-    if cross and not any("跨篇" in w for w in warns):
-        ok.append(f"跨篇源码名 {len(cross)} 个，都已进术语表")
+        body = re.split(r"^##\s+代码地图", body, maxsplit=1, flags=re.M)[0]
+        for name in code_names(body):
+            if not re.search(r"[/\\]|\.\w+\b", name):
+                usage.setdefault(name, set()).add(nn)
+    for name, numbers in sorted(usage.items()):
+        if len(numbers) > 1 and name not in gloss:
+            warns.append(f"源码名 `{name}` 跨第 {', '.join(sorted(numbers))} 篇出现；请判断是否需要收入混淆术语表")
 
-    # 3. 衔接约定：交接物名出现在上一篇终点节和下一篇篇首
-    link = read(work / "_衔接约定.md")
-    lt = table_after(section(link, r"相邻篇") or link, r"上一篇")
-    up_i, down_i, obj_i = col(lt, r"上一篇"), col(lt, r"下一篇"), col(lt, r"交接物")
-    for row in lt[1:]:
-        if None in (up_i, down_i, obj_i) or max(up_i, down_i, obj_i) >= len(row):
+    # 业务交接写在小结和下一篇开头；机制之间的阅读关联不伪装成执行交接。
+    links = read(work / "_衔接约定.md")
+    for table in md_tables(links):
+        ui, di, oi = col(table, r"上一篇"), col(table, r"下一篇"), col(table, r"交接物")
+        if None in (ui, di, oi):
             continue
-        mu, md = re.search(r"(\d{1,2})", row[up_i]), re.search(r"(\d{1,2})", row[down_i])
-        name = re.sub(r"[`*]", "", row[obj_i]).strip()
-        if not (mu and md and name):
-            continue
-        up, down = f"{int(mu.group(1)):02d}", f"{int(md.group(1)):02d}"
-        if up in bodies:
-            end_sec = section(bodies[up], r"本篇终点")
-            if name not in end_sec:
-                fails.append(f"交接物“{name}”没有出现在第 {up} 篇的“本篇终点与下一篇的接口”一节")
-            else:
-                ok.append(f"第 {up} 篇终点节含交接物“{name}”")
-        if down in bodies:
-            head = bodies[down].split("\n## ")[0]
-            if name not in head:
-                fails.append(f"交接物“{name}”没有出现在第 {down} 篇篇首（覆盖行或一句话主线之前）")
-            else:
-                ok.append(f"第 {down} 篇篇首含交接物“{name}”")
-
-    # 4. 事实摘要
-    for f in sorted((work / "_事实").glob("*.md")) if (work / "_事实").is_dir() else []:
-        nn = f.stem
-        text = read(f)
-        ids, last = set(), 0
-        ft = table_after(text, r"编号")
-        si, ci = col(ft, r"来源"), col(ft, r"核对")
-        for row in ft[1:]:
-            fid = row[0] if row else ""
-            if not fid or fid.startswith("E-NN"):
+        for row in table[1:]:
+            up, down, name = article_number(cell(row, ui)), article_number(cell(row, di)), cell(row, oi)
+            if not (up and down and filled(name)):
                 continue
-            m = re.fullmatch(r"E-(\d{2})-(\d{3})", fid)
-            if not m:
-                fails.append(f"_事实/{f.name}：编号格式不对：{fid}")
-                continue
-            if m.group(1) != nn:
-                fails.append(f"_事实/{f.name}：编号 {fid} 的篇号与文件名不一致")
-            if fid in ids:
-                fails.append(f"_事实/{f.name}：编号重复 {fid}")
-            seq = int(m.group(2))
-            if seq <= last:
-                warns.append(f"_事实/{f.name}：编号 {fid} 没有单调递增")
-            ids.add(fid)
-            last = max(last, seq)
-            if si is not None and (si >= len(row) or not row[si].startswith(SOURCE_PREFIXES)):
-                fails.append(f"_事实/{f.name}：{fid} 的来源不是规定的三种之一")
-            if ci is not None and (ci >= len(row) or row[ci] not in CHECK_STATES):
-                fails.append(f"_事实/{f.name}：{fid} 的核对状态不是 已核实/推断/待核实")
-        check = table_after(section(text, r"自查结果") or "", r"ID")
-        fails += [f"_事实/{f.name}：{x}" for x in idcheck(check, [f"F{i:02d}" for i in list(range(1, 9)) + list(range(10, 21))])]
-        ok.append(f"_事实/{f.name}：{len(ids)} 条事实")
+            if up in bodies and name not in section(bodies[up], r"本篇小结"):
+                fails.append(f"交接物“{name}”没有出现在第 {up} 篇小结")
+            if down in bodies:
+                opening = re.split(r"^##\s+", bodies[down], maxsplit=2, flags=re.M)
+                if name not in "\n".join(opening[:2]):
+                    fails.append(f"交接物“{name}”没有出现在第 {down} 篇开头")
 
-    # 5. 校对记录
-    for f in sorted((work / "_校对记录").glob("*.md")) if (work / "_校对记录").is_dir() else []:
-        rows = [r for t in md_tables(read(f)) if t and re.search(r"^ID$", t[0][0]) for r in t[1:]]
-        need = [f"R{i:02d}" for i in list(range(1, 18)) + list(range(20, 30)) + list(range(30, 39)) + [40, 41, 42, 50, 51, 52]]
-        fails += [f"_校对记录/{f.name}：{x}" for x in idcheck([["ID", "x"]] + rows, need)]
-
-    # 6. 问题台账
     ledger = table_after(read(work / "_问题台账.md"), r"状态")
     sti = col(ledger, r"^状态")
-    opens = [r[0] for r in ledger[1:] if sti is not None and sti < len(r) and r[sti].strip().lower() == "open"]
+    opens = [row[0] for row in ledger[1:] if cell(row, sti).lower() == "open"]
     if opens:
         (fails if a.final else warns).append(f"_问题台账.md 还有 {len(opens)} 个 open：{', '.join(opens[:20])}")
-
-    data = {"notes": str(notes), "fail": fails, "warn": warns, "ok": ok}
-    lines = [f"失败 {len(fails)}，警告 {len(warns)}"] + [f"FAIL {x}" for x in fails] + [f"WARN {x}" for x in warns] + [f"OK   {x}" for x in ok]
+    note = "只检查结构和候选；不能证明 G1–G6 的语义质量已通过。"
+    data = {"notes": str(notes), "fail": fails, "warn": warns, "ok": ok, "scope": note}
+    lines = [note, f"失败 {len(fails)}，警告 {len(warns)}"] + [f"FAIL {x}" for x in fails] + [f"WARN {x}" for x in warns] + [f"OK   {x}" for x in ok]
     emit(data, a.json, lines)
     return 1 if fails else 0
-
-
-def idcheck(table: list[list[str]], need: list[str]) -> list[str]:
-    """逐 ID 落盘检查：每个 ID 一行，结果不能为空，也不能只写“已检查”。"""
-    problems = []
-    seen = {}
-    for row in table[1:]:
-        if row and re.fullmatch(r"[RFM]\d{2}", row[0]):
-            seen[row[0]] = " ".join(row[1:]).strip()
-    if not seen:
-        return []  # 模板尚未开始填写
-    for i in need:
-        v = seen.get(i)
-        if v is None:
-            problems.append(f"缺少 {i} 这一行")
-        elif not v or v in {"-", "—"}:
-            problems.append(f"{i} 没有填写结果")
-        elif re.fullmatch(r"(已检查|已查|通过|OK|ok|无问题)[。.]?", v):
-            problems.append(f"{i} 只写了“{v}”，必须写命中位置或“无”")
-    return problems
 
 
 # ---------- lint ----------
@@ -760,34 +840,91 @@ def cmd_lint(a: argparse.Namespace) -> int:
     if not text:
         print(f"读不到文件：{path}", file=sys.stderr)
         return 2
-    words = R07_WORDS + (a.words or [])
-    hits = []
-    headings = 0
+    words = AI_WORDS + (a.words or [])
+    hits: list[dict] = []
+    cross_references = []
+    headings, in_map, version_block = 0, False, False
+    labels = {"【推导】": 0, "【未确认】": 0}
+    context: list[str] = []
+    label_line = 1
+
+    def add(kind: str, no: int, match: str, line: str) -> None:
+        hits.append({"id": kind, "line": no, "match": match, "text": line.strip()[:160]})
+
     for no, line in strip_code(text):
         s = line.strip()
-        for p in M01_PHRASES:
-            if p in line:
-                hits.append(("M01", no, p, s))
-        for w in words:
-            if w in line and not s.startswith("#"):
-                hits.append(("R07", no, w, s))
-        for p in R40_PHRASES:
-            if p in line:
-                hits.append(("R40", no, p, s))
-        hm = re.match(r"^(#{1,6})\s+(.*)$", s)
-        if hm:
+        heading = re.match(r"^(#{1,6})\s+(.*)$", s)
+        if heading:
             headings += 1
-            title = re.sub(r"^([一二三四五六七八九十百]+、|\d+(\.\d+)*[.、]?\s*|NN\s*·\s*)", "", hm.group(2)).strip()
-            if R33_PREFIX.match(title):
-                hits.append(("R33", no, title[:6], s))
-        lm = re.match(r"^(?:>\s*)?\*\*([^*]{2,8})\*\*[：:]", s)
-        if lm and lm.group(1) not in SUPPLEMENT_LABELS:
-            hits.append(("R23", no, lm.group(1), s))
-    data = {"file": str(path), "headings": headings, "hits": [{"id": h[0], "line": h[1], "match": h[2], "text": h[3][:160]} for h in hits]}
-    r33 = sum(1 for h in hits if h[0] == "R33")
-    lines = [f"{path}：候选 {len(hits)} 处（只是线索，是否真有问题逐条判断）；标题 {headings} 个，其中推销式开头 {r33} 个"]
-    for h in hits:
-        lines.append(f"{h[0]}  第 {h[1]} 行  [{h[2]}]  {h[3][:120]}")
+            if re.search(r"代码地图", heading.group(2)):
+                in_map = True
+            elif len(heading.group(1)) <= 2:
+                in_map = False
+            if len(heading.group(1)) <= 3:
+                context = []
+            title = re.sub(r"^([一二三四五六七八九十百]+、|\d+(\.\d+)*[.、]?\s*|NN\s*·\s*)", "", heading.group(2)).strip()
+            if SALES_TITLE.match(title):
+                add("G6-推销式标题", no, title[:12], line)
+        if in_map:
+            for match in SOURCE_LINE.findall(line):
+                add("G5-行号引用", no, match, line)
+            continue
+        for phrase in EDIT_PHRASES:
+            if phrase in line:
+                add("G6-修改痕迹", no, phrase, line)
+        for word in words:
+            if word in line and not heading:
+                add("G6-用词", no, word, line)
+        for phrase in TRANSITIONS:
+            if phrase in line:
+                add("G6-模板转场", no, phrase, line)
+        supplement = re.match(r"^>\s*\*\*([^*]{2,12})\*\*[：:]", s)
+        if supplement:
+            version_block = supplement.group(1) == "版本演进"
+            if supplement.group(1) not in SUPPLEMENT_LABELS:
+                add("G6-补充标签", no, supplement.group(1), line)
+        elif s and not s.startswith(">"):
+            version_block = False
+        for match in SOURCE_LINE.findall(line):
+            add("G5-行号引用", no, match, line)
+        for match in TEST_NAME.findall(line):
+            add("G5-测试名称", no, match, line)
+        for match in PROCESS_NOTE.findall(line):
+            add("G5-取证过程", no, match, line)
+        for label in labels:
+            count = line.count(label)
+            labels[label] += count
+            if count:
+                label_line = no
+        versions = re.findall(r"\bV\d+(?:[._]\d+)*\b|\bv?\d+\.\d+(?:\.\d+)?\b", line)
+        if len(versions) >= 2 and (not version_block or not re.search(r"因为|为了|解决|避免|改为|原先|旧.{0,12}新|问题", line)):
+            add("G5-迁移版本列举", no, "、".join(versions), line)
+        for match in CROSS_REFERENCE.findall(line):
+            nearby = "\n".join(context + [line])[-1800:]
+            signals = {
+                "problem": bool(re.search(r"为了|避免|防止|否则|减少|不必|不再|降低|没有.{0,12}(会|就)|每个请求", nearby)),
+                "steps": bool(re.search(r"先.{1,100}(再|后)|读取|查询|写入|删除|计数|回填|命中|返回|校验|比较|同步|加载", nearby)),
+                "failure": bool(re.search(r"失败|故障|异常|不可用|超时|拒绝|超限|丢失|出错", nearby)),
+            }
+            cross_references.append({"line": no, "match": match, "nearby_signals": signals,
+                                     "note": "词语信号只供定位；即使齐全，也须人工确认够用讲解。"})
+            if not all(signals.values()):
+                missing = "、".join({"problem": "作用", "steps": "工作顺序", "failure": "失败行为"}[key]
+                                  for key, present in signals.items() if not present)
+                add("G5-指路代讲", no, f"{match}；附近缺少{missing}的词语信号", line)
+        if s:
+            context.append(line)
+            context = context[-20:]
+    total_labels = sum(labels.values())
+    if total_labels > TAG_THRESHOLD:
+        add("G5-标签密集", label_line, f"合计 {total_labels} 处，默认提示阈值 {TAG_THRESHOLD}", "检查解释能否改写成效果型，或把核验材料移到理解稿和 99。")
+    note = "候选仅是线索，不能自动判定 G5/G6 通过；事实堆叠、一句话机制和补充主次仍需人工阅读。"
+    data = {"file": str(path), "headings": headings, "hits": hits,
+            "label_counts": {**labels, "total": total_labels, "threshold": TAG_THRESHOLD},
+            "cross_references": cross_references, "scope": note}
+    lines = [f"{path}：候选 {len(hits)} 处；标题 {headings} 个。", note,
+             f"解释标签合计 {total_labels} 处（默认提示阈值 {TAG_THRESHOLD}）。"]
+    lines += [f"{hit['id']}  第 {hit['line']} 行  [{hit['match']}]  {hit['text']}" for hit in hits]
     emit(data, a.json, lines)
     return 0
 
@@ -824,9 +961,10 @@ def cmd_render_revise(a: argparse.Namespace) -> int:
     text = text.replace("{{仓库名}}", a.repo_name)
     text = text.replace("{{源码仓}}", (a.source_repo or (m_path.group(1) if m_path else "<填写>")).strip())
     text = text.replace("{{基准}}", (a.base or (m_base.group(1) if m_base else "<填写>")).strip())
-    text = text.replace("{{约束取舍表}}", embed(read(refs / "约束取舍表.md")))
-    text = text.replace("{{问题清单}}", embed(read(refs / "问题清单.md")))
-    target.write_text(text, encoding="utf-8", newline="\n")
+    text = text.replace("{{讲解规范}}", embed(read(refs / "讲解规范.md")))
+    text = text.replace("{{表达规范}}", embed(read(refs / "表达规范.md")))
+    with target.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(text)
     emit({"created": str(target)}, a.json, [f"已生成：{target}", "下一步：填写「二、项目口径区」里仍是 <填写> 的项。"])
     return 0
 
@@ -865,11 +1003,11 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("consistency", help="跨篇一致性检查（只读）")
     s.add_argument("--notes", required=True)
-    s.add_argument("--final", action="store_true", help="U-收束时使用：问题台账有 open 即失败")
+    s.add_argument("--final", action="store_true", help="U-收束时使用：要求计划篇目和交接物齐全，问题台账无 open")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_consistency)
 
-    s = sub.add_parser("lint", help="可读性候选扫描（只读）")
+    s = sub.add_parser("lint", help="讲解与表达候选扫描（只读）")
     s.add_argument("--file", required=True)
     s.add_argument("--words", nargs="*", help="项目追加的 AI 味词")
     s.add_argument("--json", action="store_true")
