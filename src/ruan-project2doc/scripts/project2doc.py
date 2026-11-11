@@ -1153,6 +1153,7 @@ def cmd_lint(a: argparse.Namespace) -> int:
     headings, in_map, version_block = 0, False, False
     labels = {"【推导】": 0, "【未确认】": 0}
     supplement_blocks: list[int] = []
+    count_claims: dict[str, dict] = {}
     context: list[str] = []
     label_line = 1
 
@@ -1224,7 +1225,15 @@ def cmd_lint(a: argparse.Namespace) -> int:
             # 有“共/合计”前缀时核对两条起；否则三条起，避免把“一个/两个”当数量声明。
             if value is None or (value < 2 if prefix else value < 3):
                 continue
-            add("G5-数量声明", no, count.group(0).strip(), line)
+            # 同一声明（数量 + 量词 + 紧跟的两个字）全篇只列一次，另记出现次数，核对一次清单即可。
+            tail = re.match(r"[一-鿿A-Za-z]{0,2}", line[count.end():]).group(0)
+            claim = re.sub(r"\s+", "", count.group(0)) + tail
+            if claim in count_claims:
+                count_claims[claim]["occurrences"] += 1
+                continue
+            add("G5-数量声明", no, claim, line)
+            hits[-1]["occurrences"] = 1
+            count_claims[claim] = hits[-1]
         for match in CROSS_REFERENCE.findall(line):
             nearby = "\n".join(context + [line])[-1800:]
             signals = {
@@ -1282,7 +1291,9 @@ def cmd_lint(a: argparse.Namespace) -> int:
              f"正文名称密度：每 10 行 {density['per_10_lines']} 个（参考线 {NAME_DENSITY_REFERENCE}）；"
              f"否定限定句式 {len(extras['negatives'])} 处（提示阈值 {NEGATIVE_THRESHOLD}）；"
              f"补充块 {len(supplement_blocks)} 个。"]
-    lines += [f"{hit['id']}  第 {hit['line']} 行  [{hit['match']}]  {hit['text']}" for hit in hits]
+    lines += [f"{hit['id']}  第 {hit['line']} 行  [{hit['match']}]"
+              + (f"（同一声明共 {hit['occurrences']} 处）" if hit.get("occurrences", 1) > 1 else "")
+              + f"  {hit['text']}" for hit in hits]
     emit(data, a.json, lines)
     return 0
 

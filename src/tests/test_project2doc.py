@@ -634,6 +634,10 @@ class Lint(Base):
         data = self.scan("# 01 · 规则\n七条本地规则全部生效；共 2 项要核对；十一个引用非空。\n")
         claims = [hit for hit in data["hits"] if hit["id"] == "G5-数量声明"]
         self.assertEqual(len(claims), 3, data)
+        # 同一声明反复出现时只列一次，并记下出现次数；不同名词的声明分开列。
+        data = self.scan("# 01\n登记写下四组记录。\n失败时四组记录都不留下。\n另有四组对象容易混淆。\n")
+        claims = [hit for hit in data["hits"] if hit["id"] == "G5-数量声明"]
+        self.assertEqual([(hit["match"], hit["occurrences"]) for hit in claims], [("四组记录", 2), ("四组对象", 1)], data)
 
     def test_figure_legend_signal(self) -> None:
         good = "# 01\n```mermaid\nflowchart TD\nA[请求] --> B{库存够吗}\nB -- 否 --> C[拒绝]\nB -.-> D[失败出口]\n```\n读图时：菱形是条件分支，虚线是失败出口。\n"
@@ -831,6 +835,17 @@ class RenderRevise(NotesFixture):
         before = target.read_bytes()
         self.assertEqual(run("render-revise", "--notes", str(n), "--repo-name", "demo").returncode, 1)
         self.assertEqual(target.read_bytes(), before)
+
+    def test_project_without_rules_version_is_reported_as_unmarked(self) -> None:
+        n = self.notes()
+        s = n / "_工作区" / "_勘察结果.md"
+        s.write_text(s.read_text(encoding="utf-8").replace("| 规则版本 | ruan-project2doc 1.6.0 |\n", ""), encoding="utf-8")
+        r = run("render-revise", "--notes", str(n), "--repo-name", "old", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["rules_version"], "未标注（早于 1.6）")
+        text = (n / "修改已有笔记-old.md").read_text(encoding="utf-8")
+        self.assertIn("规则版本：未标注（早于 1.6）", text)
+        self.assertNotIn("ruan-project2doc 1.6.0", text, "没有版本字段的工程不能被写成当前版本")
 
 
 class Progress(NotesFixture):
