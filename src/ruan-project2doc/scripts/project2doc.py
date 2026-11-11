@@ -4,10 +4,11 @@
 命令：
   deps           检查依赖（只读）
   survey         勘察源码仓与 project-map（只读）
-  scaffold       建笔记工程骨架（只新建，不覆盖）
+  scaffold       建笔记工程骨架（只新建，不覆盖；写入规则版本）
   progress       核对步骤总览与笔记仓产物（只读）
   consistency    跨篇一致性检查（只读）
   lint           讲解与表达候选扫描（只读，命中只是线索）
+  skeleton       输出骨架视图（只读；--out 另写一个文件）
   render-revise  生成修改提示词文档（只新建，不覆盖）
 
 退出码：0 通过；1 存在失败项；2 参数或环境错误。
@@ -31,6 +32,8 @@ for _stream in (sys.stdout, sys.stderr):
 
 SCRIPT = Path(__file__).resolve()
 BASE = SCRIPT.parent.parent
+VERSION = "1.6.0"
+RULES_VERSION = f"ruan-project2doc {VERSION}"
 
 SKIP_DIRS = {
     ".git", "node_modules", "target", "build", "dist", "out", ".venv", "venv", "__pycache__",
@@ -55,6 +58,19 @@ SOURCE_LINE = re.compile(r"[\w./\\-]+\.[A-Za-z0-9]+(?::\d+(?:[-–]\d+)?|#L\d+(?
 TEST_NAME = re.compile(r"\b(?:[A-Z][A-Za-z0-9_]*(?:Tests?|Spec)|test_[A-Za-z0-9_]+|test[A-Z][A-Za-z0-9_]*|should[A-Z][A-Za-z0-9_]*)\b")
 PROCESS_NOTE = re.compile(r"本次(?:均)?未运行|尚无真实容器证据|测试未执行|未跑(?:过)?测试|仅静态(?:核对|核查|分析)")
 CROSS_REFERENCE = re.compile(r"(?:参见|详见|见|在)\s*第\s*\d{1,2}\s*篇")
+# 1.6 新增信号；数值都是默认值，可按实测调整并把理由记入验收记录。
+SUPPLEMENT_SPACING = 20  # 补充块平均间距低于这个行数时提示。
+NAME_PARAGRAPH_LIMIT = 5  # 一个自然段里的反引号名称超过这个数时提示。
+NAME_DENSITY_REFERENCE = 4.0  # 正文每 10 行的反引号名称参考线。
+NEGATIVE_THRESHOLD = 6  # 否定限定句式的提示阈值。
+LONG_SENTENCE_CHARS = 120  # 长并列句的字数。
+LONG_SENTENCE_SEPARATORS = 3  # 长并列句的分号或顿号数。
+COUNT_CLAIM = re.compile(r"(共有|共计|共|合计|总共|一共)?\s*(\d{1,4}|[一二两三四五六七八九十百千]+)\s*([项条步道类种处份组层个款])")
+NEGATIVE_CLAUSE = re.compile(r"(?:不能|不可|不应|不宜|无法)[^，。；！？,;!?\n]{0,16}?(?:断言|认为|当作|当成|等同|概括|套用|推断|理解为|视为|看作)")
+FIGURE_LANGS = ("mermaid", "plantuml", "puml", "dot", "graphviz")
+FENCE_LINE = re.compile(r"^(```+|~~~+)\s*([A-Za-z0-9_-]*)")
+IMG_LINE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
+CN_DIGITS = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 
 
 # ---------- 基础 ----------
@@ -171,6 +187,253 @@ def hashes_in(text: str) -> list[str]:
         if re.search(r"[a-f]", h) and re.search(r"[0-9]", h) and h not in seen:
             seen.append(h)
     return seen
+
+
+def cn_number(value: str) -> int | None:
+    """解析中文数词或阿拉伯数字；解析不了返回 None。"""
+    if value.isdigit():
+        return int(value)
+    total, current = 0, 0
+    for ch in value:
+        if ch in CN_DIGITS:
+            current = CN_DIGITS[ch]
+        elif ch == "十":
+            total += (current or 1) * 10
+            current = 0
+        elif ch == "百":
+            total += (current or 1) * 100
+            current = 0
+        elif ch == "千":
+            total += (current or 1) * 1000
+            current = 0
+        else:
+            return None
+    return total + current
+
+
+def prose_paragraphs(text: str) -> list[tuple[int, str]]:
+    """正文自然段：(起始行号, 段落文本)。不含标题、表格、代码块、注释和代码地图。
+    空行、列表项和引用块切换都另起一段；连续行号中断（中间隔着代码块等）也另起一段。"""
+    out: list[tuple[int, str]] = []
+    cur: list[str] = []
+    start, quote, last, in_map = 0, None, None, False
+
+    def flush() -> None:
+        nonlocal cur
+        if cur:
+            out.append((start, "\n".join(cur)))
+            cur = []
+
+    for no, line in strip_code(text):
+        s = line.strip()
+        heading = re.match(r"^(#{1,6})\s+(.*)$", s)
+        if heading:
+            flush()
+            if re.search(r"代码地图", heading.group(2)):
+                in_map = True
+            elif len(heading.group(1)) <= 2:
+                in_map = False
+            continue
+        if in_map or not s or s.startswith("|"):
+            flush()
+            continue
+        is_quote = s.startswith(">")
+        is_item = bool(re.match(r"^(?:>\s*)?(?:[-*+]|\d+[.、)])\s", s))
+        if cur and (is_item or is_quote != quote or (last is not None and no != last + 1)):
+            flush()
+        if not cur:
+            start, quote = no, is_quote
+        cur.append(s)
+        last = no
+    flush()
+    return out
+
+
+def lint_extra_signals(text: str) -> dict:
+    """G6-名称密集、G6-长并列句、G6-否定限定的统计；行号按原文。"""
+    dense_paragraphs, long_sentences, negatives = [], [], []
+    names, body_lines = 0, 0
+    in_map = False
+    for no, line in strip_code(text):
+        s = line.strip()
+        heading = re.match(r"^(#{1,6})\s+(.*)$", s)
+        if heading:
+            if re.search(r"代码地图", heading.group(2)):
+                in_map = True
+            elif len(heading.group(1)) <= 2:
+                in_map = False
+        if in_map or s.startswith("|"):
+            continue
+        body_lines += 1
+        if not heading:
+            names += len(re.findall(r"`[^`\n]+`", line))
+        for match in NEGATIVE_CLAUSE.findall(line):
+            negatives.append({"line": no, "match": match, "text": s[:160]})
+    for start, para in prose_paragraphs(text):
+        count = len(re.findall(r"`[^`\n]+`", para))
+        if count > NAME_PARAGRAPH_LIMIT:
+            dense_paragraphs.append({"line": start, "count": count, "text": para.replace("\n", " ")[:160]})
+        for sentence in re.split(r"[。！？!?]", para):
+            compact = re.sub(r"\s", "", sentence)
+            separators = len(re.findall(r"[；;、]", sentence))
+            if len(compact) > LONG_SENTENCE_CHARS and separators >= LONG_SENTENCE_SEPARATORS:
+                long_sentences.append({"line": start, "chars": len(compact), "separators": separators,
+                                       "text": sentence.strip()[:160]})
+    density = round(names / body_lines * 10, 1) if body_lines else 0.0
+    return {
+        "name_density": {"names": names, "body_lines": body_lines, "per_10_lines": density,
+                         "reference": NAME_DENSITY_REFERENCE,
+                         "note": "行数含标题与空行，不含表格、代码块和代码地图；参考线是默认值。"},
+        "dense_paragraphs": dense_paragraphs,
+        "long_sentences": long_sentences,
+        "negatives": negatives,
+    }
+
+
+def figure_blocks(text: str) -> list[dict]:
+    """按行解析围栏图块：起点、终点、语言、是否有判断节点与虚线边。"""
+    figures, fence, cur = [], None, None
+    for idx, line in enumerate(text.splitlines(), 1):
+        s = line.strip()
+        if fence is None:
+            m = FENCE_LINE.match(s) if s.startswith(("```", "~~~")) else None
+            if m:
+                fence = m.group(1)[0] * 3
+                cur = {"start": idx, "lang": m.group(2).lower(), "lines": []}
+        else:
+            if s.startswith(fence):
+                cur["end"] = idx
+                figures.append(cur)
+                fence, cur = None, None
+            else:
+                cur["lines"].append(line)
+    for fig in figures:
+        body = "\n".join(l for l in fig["lines"] if not l.strip().startswith("%%"))
+        lang = fig["lang"]
+        first = (fig["lines"][0].strip() if fig["lines"] else "")
+        if lang in ("mermaid", ""):
+            if re.match(r"sequenceDiagram", first):
+                fig["has_dashed"] = bool(re.search(r"-->>|--x|--\)|-->", body))
+                fig["has_decision"] = bool(re.search(r"^\s*(alt|opt|else)\b", body, re.M))
+            else:
+                fig["has_decision"] = bool(re.search(r"\{[^{}\n]+\}", body) or "<<choice>>" in body)
+                fig["has_dashed"] = bool(re.search(r"-\.->|-\.-|-\.\s|\.->", body))
+        elif lang in ("plantuml", "puml"):
+            fig["has_decision"] = bool(re.search(r"\bif\s*\(|\belse\b", body))
+            fig["has_dashed"] = bool(re.search(r"\.\.>|-\[dashed\]", body))
+        else:
+            fig["has_decision"] = bool(re.search(r"\{[^{}\n]+\}|\bif\s*\(", body))
+            fig["has_dashed"] = bool(re.search(r"-\.->|\.\.>|dashed", body))
+    return figures
+
+
+def figure_legend_hits(text: str) -> list[dict]:
+    """G3-图例不符：图后文字提到“菱形”而图里没有判断节点，提到“虚线”而图里没有虚线边。"""
+    hits: list[dict] = []
+    lines = text.splitlines()
+    for fig in figure_blocks(text):
+        for idx in range(fig["end"] + 1, min(fig["end"] + 15, len(lines)) + 1):
+            s = lines[idx - 1]
+            if re.match(r"^\s*#{1,6}\s", s) or s.strip().startswith(("```", "~~~")):
+                break
+            if "菱形" in s and not fig["has_decision"]:
+                hits.append({"line": idx, "match": "菱形；图里没有判断节点", "text": s.strip()[:160]})
+            if "虚线" in s and not fig["has_dashed"]:
+                hits.append({"line": idx, "match": "虚线；图里没有虚线边", "text": s.strip()[:160]})
+    return hits
+
+
+def parse_headings(text: str) -> list[tuple[int, int, str]]:
+    """(0 基行号, 级别, 标题)；跳过围栏代码块。"""
+    headings, fence = [], None
+    for i, line in enumerate(text.splitlines()):
+        s = line.strip()
+        if fence:
+            if s.startswith(fence):
+                fence = None
+            continue
+        if s.startswith(("```", "~~~")):
+            fence = s[:3]
+            continue
+        m = re.match(r"^(#{1,6})\s+(.*)$", s)
+        if m:
+            headings.append((i, len(m.group(1)), m.group(2).strip()))
+    return headings
+
+
+def first_paragraph_after(lines: list[str], start: int, stop: int) -> str | None:
+    """标题后的第一个自然段（0 基行号区间 [start, stop)）；遇下级标题或没有正文返回 None。"""
+    i = start
+    while i < stop:
+        s = lines[i].strip()
+        if not s:
+            i += 1
+            continue
+        if re.match(r"^#{1,6}\s", s):
+            return None
+        if s.startswith(("```", "~~~")):
+            fence = s[:3]
+            i += 1
+            while i < stop and not lines[i].strip().startswith(fence):
+                i += 1
+            i += 1
+            continue
+        if s.startswith("<!--"):
+            while i < stop and "-->" not in lines[i]:
+                i += 1
+            i += 1
+            continue
+        if s.startswith("|"):
+            while i < stop and lines[i].strip().startswith("|"):
+                i += 1
+            continue
+        block: list[str] = []
+        while i < stop:
+            s = lines[i].strip()
+            if not s or re.match(r"^#{1,6}\s", s) or s.startswith(("```", "~~~")):
+                break
+            block.append(s)
+            i += 1
+            if len(block) >= 10:
+                block.append("……")
+                break
+        return "\n".join(block) if block else None
+    return None
+
+
+def narrative_plan_problem(section_text: str) -> str | None:
+    """讲述方案区块的非空检查；返回问题描述或 None。"""
+    body = "\n".join(section_text.splitlines()[1:])
+    walk = re.search(r"全流程走查[：:]\s*(.*)", body)
+    if walk is not None:
+        if not filled(walk.group(1)):
+            return "的“全流程走查”未填写"
+        org = re.search(r"组织方式(?:与理由)?[：:]\s*(.*)", body)
+        if org and not filled(org.group(1)):
+            return "的“组织方式与理由”未填写"
+        return None
+    stripped = re.sub(r"<[^<>\n]*>", "", body)
+    stripped = re.sub(r"[\s|:\-—]", "", stripped)
+    return None if len(stripped) >= 20 else "为空或仍是模板占位"
+
+
+def block_has_content(section_text: str) -> bool:
+    """区块（去掉标题行、占位符与表格符）是否留有实际内容。"""
+    body = "\n".join(section_text.splitlines()[1:])
+    body = re.sub(r"<[^<>\n]*>", "", body)
+    body = re.sub(r"[\s|:\-—#]", "", body)
+    return len(body) >= 10
+
+
+def rules_version_of(text: str) -> str | None:
+    """从文本里取“规则版本”字段；缺失或仍是占位符时返回 None。"""
+    m = re.search(r"规则版本\s*[|：:]\s*([^|\n]+)", text)
+    if not m:
+        return None
+    value = m.group(1).strip().strip("`").strip()
+    if not value or re.fullmatch(r"\{\{.*?\}\}|<[^>]+>", value):
+        return None
+    return value
 
 
 def skill_roots(extra: list[str]) -> list[Path]:
@@ -506,8 +769,17 @@ def cmd_scaffold(a: argparse.Namespace) -> int:
         if not f.name.startswith("需求包-"):
             copy_new(f, pack / "模板" / f.name, created, skipped)
     copy_new(SCRIPT, pack / "工具" / "project2doc.py", created, skipped)
-    data = {"project": str(proj), "repo_name": a.repo_name, "created": created, "skipped_existing": skipped}
-    lines = [f"笔记工程：{proj}", f"新建 {len(created)} 项，已存在而跳过 {len(skipped)} 项。"] + [f"  + {c}" for c in created] + [f"  = {s}" for s in skipped]
+    # 规则版本只写进本次新建的文件；已有文件不动，工程始终使用它归档的那一版规则。
+    for target in (notes / "_工作区" / "_勘察结果.md", pack / "00-任务说明.md"):
+        if str(target) in created:
+            body = read(target)
+            if "{{规则版本}}" in body:
+                with target.open("w", encoding="utf-8", newline="\n") as stream:
+                    stream.write(body.replace("{{规则版本}}", RULES_VERSION))
+    data = {"project": str(proj), "repo_name": a.repo_name, "rules_version": RULES_VERSION,
+            "created": created, "skipped_existing": skipped}
+    lines = [f"笔记工程：{proj}", f"规则版本：{RULES_VERSION}（写入新建的 _勘察结果.md 与 00-任务说明.md）",
+             f"新建 {len(created)} 项，已存在而跳过 {len(skipped)} 项。"] + [f"  + {c}" for c in created] + [f"  = {s}" for s in skipped]
     lines.append("下一步：U-勘察，填写 笔记/_工作区/_勘察结果.md。资料仓 docs/AI dev docs/ 由 ruan-dev-skills 初始化时创建。")
     emit(data, a.json, lines)
     return 0
@@ -634,14 +906,17 @@ def planned_questions(text: str) -> dict[str, dict[str, dict]]:
     for table in md_tables(text):
         qi, ni = col(table, r"题号|追问编号"), col(table, r"^篇号")
         pi, ci = col(table, r"^问题$|^追问$"), col(table, r"核心题")
+        bi = col(table, r"^必答")
         if None in (qi, ni, pi):
             continue
         for row in table[1:]:
             number, qid = article_number(cell(row, ni)), cell(row, qi)
             if number and filled(qid):
+                yes = r"^(是|核心|必答|yes|true)$"
                 questions.setdefault(number, {})[qid] = {
                     "question": cell(row, pi),
-                    "core": bool(re.search(r"^(是|核心|必答|yes|true)$", cell(row, ci), re.I)),
+                    # 必答题（整体复述、子流程复述、用户指定）与核心题同样要求全部答得出且正确。
+                    "core": bool(re.search(yes, cell(row, ci), re.I) or re.search(yes, cell(row, bi), re.I)),
                 }
     return questions
 
@@ -649,6 +924,14 @@ def planned_questions(text: str) -> dict[str, dict[str, dict]]:
 def check_review(text: str, expected: dict[str, dict]) -> list[str]:
     """核对审读记录是否齐全；正确性由审读者回源码判断，本函数不判语义。"""
     problems = []
+    for label, pattern in (("阶段 A（骨架复述）", r"阶段\s*A|骨架复述"),
+                           ("阶段 B（通读复述与初读障碍）", r"阶段\s*B|通读复述"),
+                           ("阶段 C（逐题作答）", r"阶段\s*C|逐题作答")):
+        block = section(text, pattern)
+        if not block:
+            problems.append(f"缺少{label}区块")
+        elif label != "阶段 C（逐题作答）" and not block_has_content(block):
+            problems.append(f"{label}区块没有保留原答内容")
     answers: dict[str, dict] = {}
     for table in md_tables(text):
         qi, ji = col(table, r"题号|追问编号"), col(table, r"^判定")
@@ -772,7 +1055,7 @@ def cmd_consistency(a: argparse.Namespace) -> int:
                 fails.append(f"核心机制“{name}”的主讲篇不在规划篇目中")
 
     # 理解稿是段落式交接物。只核对结构，逐条来源和讲解质量仍须人工审读。
-    study_sections = ("流程走查", "机制卡", "关键数据", "追问", "意图", "取证材料|核验材料|核对材料", "细节去向")
+    study_sections = ("流程走查", "机制卡", "关键数据", "追问", "意图", "取证材料|核验材料|核对材料", "细节去向", "讲述方案")
     for nn in articles:
         study = read(work / "_研读" / f"{nn}.md")
         review = read(work / "_审读记录" / f"{nn}.md")
@@ -782,6 +1065,11 @@ def cmd_consistency(a: argparse.Namespace) -> int:
             for heading in study_sections:
                 if not section(study, heading):
                     fails.append(f"_研读/{nn}.md 缺少“{heading}”部分")
+            plan_block = section(study, r"讲述方案")
+            if plan_block:
+                problem = narrative_plan_problem(plan_block)
+                if problem:
+                    fails.append(f"_研读/{nn}.md 的讲述方案{problem}")
         if not questions.get(nn):
             fails.append(f"第 {nn} 篇没有规划追问")
         if not review.strip():
@@ -825,8 +1113,27 @@ def cmd_consistency(a: argparse.Namespace) -> int:
     opens = [row[0] for row in ledger[1:] if cell(row, sti).lower() == "open"]
     if opens:
         (fails if a.final else warns).append(f"_问题台账.md 还有 {len(opens)} 个 open：{', '.join(opens[:20])}")
+
+    # 规则版本：新建工程由 scaffold 写入；缺失报告为“未标注”，按警告处理，不自行推定。
+    version_sources = {}
+    for label, path in (("_工作区/_勘察结果.md", work / "_勘察结果.md"),
+                        ("需求包/00-任务说明.md", notes.parent / "需求包" / "00-任务说明.md")):
+        text = read(path)
+        if text.strip():
+            value = rules_version_of(text)
+            if value:
+                version_sources[label] = value
+    values = sorted(set(version_sources.values()))
+    if not values:
+        rules_version = "未标注（早于 1.6）"
+        warns.append(f"规则版本：{rules_version}；继续该工程前先向用户说明，不混用两版规则")
+    elif len(values) > 1:
+        rules_version = "不一致"
+        warns.append("规则版本不一致：" + "；".join(f"{k} = {v}" for k, v in sorted(version_sources.items())))
+    else:
+        rules_version = values[0]
     note = "只检查结构和候选；不能证明 G1–G6 的语义质量已通过。"
-    data = {"notes": str(notes), "fail": fails, "warn": warns, "ok": ok, "scope": note}
+    data = {"notes": str(notes), "rules_version": rules_version, "fail": fails, "warn": warns, "ok": ok, "scope": note}
     lines = [note, f"失败 {len(fails)}，警告 {len(warns)}"] + [f"FAIL {x}" for x in fails] + [f"WARN {x}" for x in warns] + [f"OK   {x}" for x in ok]
     emit(data, a.json, lines)
     return 1 if fails else 0
@@ -845,6 +1152,7 @@ def cmd_lint(a: argparse.Namespace) -> int:
     cross_references = []
     headings, in_map, version_block = 0, False, False
     labels = {"【推导】": 0, "【未确认】": 0}
+    supplement_blocks: list[int] = []
     context: list[str] = []
     label_line = 1
 
@@ -880,6 +1188,7 @@ def cmd_lint(a: argparse.Namespace) -> int:
                 add("G6-模板转场", no, phrase, line)
         supplement = re.match(r"^>\s*\*\*([^*]{2,12})\*\*[：:]", s)
         if supplement:
+            supplement_blocks.append(no)
             version_block = supplement.group(1) == "版本演进"
             if supplement.group(1) not in SUPPLEMENT_LABELS:
                 add("G6-补充标签", no, supplement.group(1), line)
@@ -899,6 +1208,23 @@ def cmd_lint(a: argparse.Namespace) -> int:
         versions = re.findall(r"\bV\d+(?:[._]\d+)*\b|\bv?\d+\.\d+(?:\.\d+)?\b", line)
         if len(versions) >= 2 and (not version_block or not re.search(r"因为|为了|解决|避免|改为|原先|旧.{0,12}新|问题", line)):
             add("G5-迁移版本列举", no, "、".join(versions), line)
+        for count in COUNT_CLAIM.finditer(line):
+            prefix, number = count.group(1), count.group(2)
+            before = line[: count.start(2)].rstrip()
+            # 序数、频率、区间和约数不是数量声明：第 3 步、每 20 行、三到五个、约 5 个、1.5 个。
+            if before and before[-1] in "第每到至~–—-或约.．":
+                continue
+            after = line[count.end(): count.end() + 3]
+            if after.startswith(("以上", "以内", "以下", "左右", "有余", "多")):
+                continue
+            # “43 个字符”“3 个小时”是度量，不是需要配清单的数量声明。
+            if count.group(3) == "个" and after.startswith(("字符", "字节", "字", "小时", "月", "工作日", "百分点", "星期", "季度", "数量级", "像素")):
+                continue
+            value = cn_number(number)
+            # 有“共/合计”前缀时核对两条起；否则三条起，避免把“一个/两个”当数量声明。
+            if value is None or (value < 2 if prefix else value < 3):
+                continue
+            add("G5-数量声明", no, count.group(0).strip(), line)
         for match in CROSS_REFERENCE.findall(line):
             nearby = "\n".join(context + [line])[-1800:]
             signals = {
@@ -918,14 +1244,134 @@ def cmd_lint(a: argparse.Namespace) -> int:
     total_labels = sum(labels.values())
     if total_labels > TAG_THRESHOLD:
         add("G5-标签密集", label_line, f"合计 {total_labels} 处，默认提示阈值 {TAG_THRESHOLD}", "检查解释能否改写成效果型，或把核验材料移到理解稿和 99。")
-    note = "候选仅是线索，不能自动判定 G5/G6 通过；事实堆叠、一句话机制和补充主次仍需人工阅读。"
+    total_lines = len(text.splitlines())
+    spacing = round(total_lines / len(supplement_blocks), 1) if supplement_blocks else None
+    if len(supplement_blocks) >= 2 and spacing < SUPPLEMENT_SPACING:
+        add("G5-补充块过密", supplement_blocks[0],
+            f"共 {len(supplement_blocks)} 个补充块，全文 {total_lines} 行，平均每 {spacing} 行一个（默认提示线每 {SUPPLEMENT_SPACING} 行一个）",
+            "检查主线是否被切碎、主次是否倒置。")
+    for item in figure_legend_hits(text):
+        add("G3-图例不符", item["line"], item["match"], item["text"])
+    extras = lint_extra_signals(text)
+    for item in extras["dense_paragraphs"]:
+        add("G6-名称密集", item["line"], f"本段 {item['count']} 个反引号名称（默认提示超过 {NAME_PARAGRAPH_LIMIT} 个）", item["text"])
+    density = extras["name_density"]
+    if density["per_10_lines"] > NAME_DENSITY_REFERENCE and density["body_lines"] >= 30:
+        add("G6-名称密集", 1, f"全篇正文每 10 行 {density['per_10_lines']} 个名称（参考线每 10 行 {NAME_DENSITY_REFERENCE} 个）",
+            "参考线是默认值；表格、代码块和代码地图不计。")
+    for item in extras["long_sentences"]:
+        add("G6-长并列句", item["line"], f"{item['chars']} 字、{item['separators']} 处分号或顿号", item["text"])
+    if len(extras["negatives"]) > NEGATIVE_THRESHOLD:
+        for item in extras["negatives"]:
+            add("G6-否定限定", item["line"], item["match"], item["text"])
+        add("G6-否定限定", extras["negatives"][-1]["line"],
+            f"合计 {len(extras['negatives'])} 处，超过默认提示阈值 {NEGATIVE_THRESHOLD}",
+            "逐句判断：改写为对现状的直接陈述，或把不影响理解的未知移到 99。")
+    note = "候选仅是线索，不能自动判定 G3/G5/G6 通过；事实堆叠、一句话机制、补充主次和组织仍需人工阅读。"
     data = {"file": str(path), "headings": headings, "hits": hits,
             "label_counts": {**labels, "total": total_labels, "threshold": TAG_THRESHOLD},
-            "cross_references": cross_references, "scope": note}
+            "cross_references": cross_references,
+            "supplement_blocks": {"count": len(supplement_blocks), "lines": total_lines, "spacing": spacing,
+                                  "threshold": SUPPLEMENT_SPACING},
+            "name_density": density,
+            "negative_constraints": {"count": len(extras["negatives"]), "threshold": NEGATIVE_THRESHOLD,
+                                     "positions": extras["negatives"]},
+            "scope": note}
     lines = [f"{path}：候选 {len(hits)} 处；标题 {headings} 个。", note,
-             f"解释标签合计 {total_labels} 处（默认提示阈值 {TAG_THRESHOLD}）。"]
+             f"解释标签合计 {total_labels} 处（默认提示阈值 {TAG_THRESHOLD}）。",
+             f"正文名称密度：每 10 行 {density['per_10_lines']} 个（参考线 {NAME_DENSITY_REFERENCE}）；"
+             f"否定限定句式 {len(extras['negatives'])} 处（提示阈值 {NEGATIVE_THRESHOLD}）；"
+             f"补充块 {len(supplement_blocks)} 个。"]
     lines += [f"{hit['id']}  第 {hit['line']} 行  [{hit['match']}]  {hit['text']}" for hit in hits]
     emit(data, a.json, lines)
+    return 0
+
+
+# ---------- skeleton ----------
+
+def cmd_skeleton(a: argparse.Namespace) -> int:
+    path = Path(a.file)
+    text = read(path)
+    if not text:
+        print(f"读不到文件：{path}", file=sys.stderr)
+        return 2
+    if a.out and Path(a.out).resolve() == path.resolve():
+        print("--out 不能覆盖源文件。", file=sys.stderr)
+        return 2
+    lines = text.splitlines()
+    headings = parse_headings(text)
+    figures = []
+    fence, kind = None, ""
+    for no, line in enumerate(lines, 1):
+        s = line.strip()
+        if fence:
+            if s.startswith(fence):
+                if kind in FIGURE_LANGS:
+                    figures.append({"line": no, "kind": kind})
+                fence, kind = None, ""
+            continue
+        m = FENCE_LINE.match(s) if s.startswith(("```", "~~~")) else None
+        if m:
+            fence, kind = m.group(1)[0] * 3, m.group(2).lower()
+            continue
+        if IMG_LINE.search(line):
+            figures.append({"line": no, "kind": "image"})
+    if not headings:
+        skeleton = text.rstrip("\n") + "\n"
+        title = ""
+        lead = skeleton
+        first_title = ""
+        outline_rows: list[tuple[int, int, str, str | None]] = []
+    else:
+        title_idx, _, title = headings[0]
+        rest = headings[1:]
+        if not rest:
+            skeleton = "\n".join(lines).rstrip("\n") + "\n"
+            lead, first_title, outline_rows = "\n".join(lines[title_idx + 1:]), "", []
+        else:
+            chapter_level = min(level for _, level, _ in rest)
+            first_pos = next(i for i, (_, level, _) in enumerate(rest) if level == chapter_level)
+            first_idx = rest[first_pos][0]
+            first_end = len(lines)
+            for idx, level, _ in rest[first_pos + 1:]:
+                if level <= chapter_level:
+                    first_end = idx
+                    break
+            lead = "\n".join(lines[title_idx + 1: rest[0][0]]).strip("\n")
+            first_title = rest[first_pos][2]
+            outline_rows = []
+            for pos, (idx, level, item) in enumerate(rest):
+                if first_idx <= idx < first_end:
+                    continue  # 全貌等第一个一级章节已全文输出
+                if level > chapter_level + 2:
+                    continue
+                if re.search(r"代码地图", item):
+                    outline_rows.append((idx, level, item, None))
+                    continue
+                stop = rest[pos + 1][0] if pos + 1 < len(rest) else len(lines)
+                outline_rows.append((idx, level, item, first_paragraph_after(lines, idx + 1, stop)))
+            parts = [lines[title_idx], ""]
+            if lead:
+                parts += [lead, ""]
+            parts += ["\n".join(lines[first_idx:first_end]).rstrip("\n"), ""]
+            for idx, level, item, para in outline_rows:
+                parts += ["#" * level + " " + item, ""]
+                if para:
+                    parts += [para, ""]
+            skeleton = "\n".join(parts).rstrip("\n") + "\n"
+    header ="<!-- 骨架视图（skeleton）：篇首块 + 第一个一级章节全文 + 其余一至三级标题及其下第一段；不是完整正文。 -->\n\n"
+    output = header + skeleton
+    if a.out:
+        out_path = Path(a.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with out_path.open("w", encoding="utf-8", newline="\n") as stream:
+            stream.write(output)
+    scope = "骨架视图只供阶段 A 复述与成文自查；完整内容以正文为准。"
+    data = {"file": str(path), "title": title, "out": str(Path(a.out).resolve()) if a.out else None,
+            "headings": [{"line": i + 1, "level": level, "title": item} for i, level, item in headings],
+            "figures": figures, "skeleton": output, "scope": scope}
+    emit(data, a.json, ([f"已写出骨架视图：{a.out}", f"标题 {len(headings)} 个；图 {len(figures)} 处。", scope]
+                        if a.out else output.splitlines() + ["", scope]))
     return 0
 
 
@@ -957,15 +1403,18 @@ def cmd_render_revise(a: argparse.Namespace) -> int:
     survey = read(notes / "_工作区" / "_勘察结果.md")
     m_path = re.search(r"\|\s*仓库路径\s*\|\s*([^|]+?)\s*\|", survey)
     m_base = re.search(r"\|\s*源码基准提交\s*\|\s*([^|]+?)\s*\|", survey)
+    version = rules_version_of(survey) or "未标注（早于 1.6）"
     text = read(tpls / "修改已有笔记.md")
     text = text.replace("{{仓库名}}", a.repo_name)
     text = text.replace("{{源码仓}}", (a.source_repo or (m_path.group(1) if m_path else "<填写>")).strip())
     text = text.replace("{{基准}}", (a.base or (m_base.group(1) if m_base else "<填写>")).strip())
+    text = text.replace("{{规则版本}}", version)
     text = text.replace("{{讲解规范}}", embed(read(refs / "讲解规范.md")))
     text = text.replace("{{表达规范}}", embed(read(refs / "表达规范.md")))
     with target.open("w", encoding="utf-8", newline="\n") as stream:
         stream.write(text)
-    emit({"created": str(target)}, a.json, [f"已生成：{target}", "下一步：填写「二、项目口径区」里仍是 <填写> 的项。"])
+    emit({"created": str(target), "rules_version": version}, a.json,
+         [f"已生成：{target}", f"规则版本：{version}", "下一步：填写「二、项目口径区」里仍是 <填写> 的项。"])
     return 0
 
 
@@ -973,6 +1422,7 @@ def cmd_render_revise(a: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="ruan-project2doc 辅助脚本")
+    p.add_argument("--version", action="version", version=RULES_VERSION)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("deps", help="检查依赖（只读）")
@@ -1012,6 +1462,12 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--words", nargs="*", help="项目追加的 AI 味词")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_lint)
+
+    s = sub.add_parser("skeleton", help="输出骨架视图（只读；--out 另写一个文件）")
+    s.add_argument("--file", required=True)
+    s.add_argument("--out", help="把骨架视图写到这个文件（不能是源文件本身）")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_skeleton)
 
     s = sub.add_parser("render-revise", help="生成修改提示词文档（只新建，不覆盖）")
     s.add_argument("--notes", required=True)

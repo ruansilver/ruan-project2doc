@@ -55,7 +55,9 @@ class SkillLayout(unittest.TestCase):
     def test_frontmatter_and_resources(self) -> None:
         text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
         self.assertTrue(text.startswith("---\nname: ruan-project2doc\n"))
-        self.assertIn('version: "1.5.0"', text.split("---")[1])
+        self.assertIn('version: "1.6.0"', text.split("---")[1])
+        self.assertIn("# ruan-project2doc 1.6.0", text)
+        self.assertIn("`skeleton --file F [--out O]`", text, "命令表应列出 skeleton")
         desc = next(line for line in text.splitlines() if line.startswith("description:"))
         self.assertLessEqual(len(desc) - len("description: "), 1024)
         for ref in ["定位与标杆", "讲解规范", "表达规范", "篇目规划", "生产流程与交接物", "质量门",
@@ -203,6 +205,26 @@ class Scaffold(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("七问", (proj / "笔记" / "修改已有笔记-demo.md").read_text(encoding="utf-8"))
 
+    def test_rules_version_written_to_new_files_only(self) -> None:
+        proj = self.tmp / "v-笔记工程"
+        r = run("scaffold", "--project", str(proj), "--repo-name", "v", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["rules_version"], "ruan-project2doc 1.6.0")
+        survey_path = proj / "笔记" / "_工作区" / "_勘察结果.md"
+        survey = survey_path.read_text(encoding="utf-8")
+        task = (proj / "需求包" / "00-任务说明.md").read_text(encoding="utf-8")
+        for text in (survey, task):
+            self.assertIn("| 规则版本 | ruan-project2doc 1.6.0 |", text)
+            self.assertNotIn("{{规则版本}}", text)
+        # 需求包里的模板副本保持通用；已有文件不因再次 scaffold 而改写。
+        self.assertIn("{{规则版本}}", (proj / "需求包" / "模板" / "_勘察结果.md").read_text(encoding="utf-8"))
+        survey_path.write_text("旧工程内容，没有版本字段", encoding="utf-8")
+        self.assertEqual(run("scaffold", "--project", str(proj), "--repo-name", "v").returncode, 0)
+        self.assertEqual(survey_path.read_text(encoding="utf-8"), "旧工程内容，没有版本字段")
+        r = run("--version")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("ruan-project2doc 1.6.0", r.stdout)
+
 
 class NotesFixture(Base):
     def notes(self) -> Path:
@@ -237,7 +259,7 @@ class NotesFixture(Base):
             """)
         write(n / "99-复核说明.md", "# 99 · 复核说明\n源码基准和未展开入口见本页。\n")
         w = n / "_工作区"
-        write(w / "_勘察结果.md", "| 仓库路径 | D:/demo |\n| 源码基准提交 | abc1234def |\n")
+        write(w / "_勘察结果.md", "| 仓库路径 | D:/demo |\n| 源码基准提交 | abc1234def |\n| 规则版本 | ruan-project2doc 1.6.0 |\n")
         write(w / "_术语表.md", """
             | 术语 | 本项目含义 | 源码名 |
             |---|---|---|
@@ -282,9 +304,17 @@ class NotesFixture(Base):
                 此夹具只用于检查机械交接，不证明真实业务。
                 ## 七、细节去向
                 日志字段未展开，留在这里。
+                ## 八、讲述方案
+                组织方式与理由：按执行流程；下单是一次请求内的先后动作。
+                全流程走查：用户提交订单，处理器先锁库存，再创建待支付订单并把编号返回给用户。
                 """)
             write(w / "_审读记录" / f"{nn}.md", f"""
-                ## G1 追问测试
+                ## 一、G1：第一轮（独立读者）
+                ### 阶段 A：骨架复述
+                读者只看骨架视图后复述：这篇讲订单请求怎样留下结果，先做前置检查，再改变订单状态。
+                ### 阶段 B：通读复述与初读障碍
+                读者通读后复述：处理器先完成前置检查，再改变订单状态；没有读不懂的术语。
+                ### 阶段 C：逐题作答
                 | 题号 | 仅凭正文的答案 | 判定 | 正文出处 | 对照理解稿和源码的核对 |
                 |---|---|---|---|---|
                 | {nn}-1 | 先完成前置检查，再改变订单状态。 | 答得出 | 第一节 | 正确；与夹具的顺序一致。 |
@@ -456,6 +486,70 @@ class Consistency(NotesFixture):
         self.assertEqual(code, 1, data)
         self.assertIn("第 02 篇开头", "\n".join(data["fail"]))
 
+    def test_narrative_plan_required_and_not_placeholder(self) -> None:
+        n = self.notes()
+        f = n / "_工作区" / "_研读" / "01.md"
+        original = f.read_text(encoding="utf-8")
+        f.write_text(original.replace("## 八、讲述方案", "## 八、补充说明"), encoding="utf-8")
+        code, data = self.check(n)
+        self.assertEqual(code, 1, data)
+        self.assertIn("讲述方案", "\n".join(data["fail"]))
+        f.write_text(original.replace("全流程走查：用户提交订单，处理器先锁库存，再创建待支付订单并把编号返回给用户。",
+                                      "全流程走查：<用一段话把这件事从发起到结果讲完>"), encoding="utf-8")
+        code, data = self.check(n)
+        self.assertEqual(code, 1, data)
+        self.assertIn("全流程走查", "\n".join(data["fail"]))
+        f.write_text(original, encoding="utf-8")
+        code, data = self.check(n)
+        self.assertEqual(code, 0, data)
+
+    def test_review_requires_three_stage_blocks(self) -> None:
+        n = self.notes()
+        f = n / "_工作区" / "_审读记录" / "01.md"
+        original = f.read_text(encoding="utf-8")
+        f.write_text(original.replace("### 阶段 A：骨架复述", "### 读者复述"), encoding="utf-8")
+        code, data = self.check(n)
+        self.assertEqual(code, 1, data)
+        self.assertIn("阶段 A", "\n".join(data["fail"]))
+        f.write_text(original.replace("读者通读后复述：处理器先完成前置检查，再改变订单状态；没有读不懂的术语。", "（待填）"), encoding="utf-8")
+        code, data = self.check(n)
+        self.assertEqual(code, 1, data)
+        self.assertIn("阶段 B", "\n".join(data["fail"]))
+        f.write_text(original, encoding="utf-8")
+        code, data = self.check(n)
+        self.assertEqual(code, 0, data)
+
+    def test_rules_version_reported(self) -> None:
+        n = self.notes()
+        code, data = self.check(n)
+        self.assertEqual(data["rules_version"], "ruan-project2doc 1.6.0")
+        self.assertFalse(any("规则版本" in message for message in data["warn"]))
+        s = n / "_工作区" / "_勘察结果.md"
+        s.write_text(s.read_text(encoding="utf-8").replace("| 规则版本 | ruan-project2doc 1.6.0 |\n", ""), encoding="utf-8")
+        code, data = self.check(n)
+        self.assertEqual(code, 0, data)
+        self.assertEqual(data["rules_version"], "未标注（早于 1.6）")
+        self.assertTrue(any("未标注" in message for message in data["warn"]))
+
+    def test_required_question_counts_as_core(self) -> None:
+        n = self.notes()
+        p = n / "_工作区" / "_规划方案.md"
+        plan = p.read_text(encoding="utf-8")
+        plan = plan.replace("| 题号 | 篇号 | 机制或判断 | 层次 | 问题 | 核心题 |\n|---|---|---|---|---|---|\n",
+                            "| 题号 | 篇号 | 类型 | 机制或判断 | 层次 | 问题 | 核心题 | 必答 |\n|---|---|---|---|---|---|---|---|\n")
+        plan = plan.replace("| 01-1 | 01 | 库存锁 | L2 | 哪一步先发生？ | 是 |",
+                            "| 01-1 | 01 | 整体复述 | — | 这件事解决什么问题？ | 否 | 是 |")
+        plan = plan.replace("| 02-1 | 02 | 支付幂等 | L2 | 回调怎样改变订单？ | 是 |",
+                            "| 02-1 | 02 | 整体复述 | — | 待支付订单怎样变为已支付？ | 否 | 是 |")
+        p.write_text(plan, encoding="utf-8")
+        code, data = self.check(n)
+        self.assertEqual(code, 0, data)
+        r = n / "_工作区" / "_审读记录" / "01.md"
+        r.write_text(r.read_text(encoding="utf-8").replace("| 01-1 | 先完成前置检查，再改变订单状态。 | 答得出", "| 01-1 | 先完成前置检查，再改变订单状态。 | 部分"), encoding="utf-8")
+        code, data = self.check(n)
+        self.assertEqual(code, 1, data)
+        self.assertIn("核心题 01-1", "\n".join(data["fail"]))
+
 
 class Lint(Base):
     def scan(self, text: str) -> dict:
@@ -523,6 +617,198 @@ class Lint(Base):
         self.assertTrue({"G6-修改痕迹", "G6-用词", "G6-补充标签", "G6-推销式标题", "G6-模板转场"} <= ids)
         self.assertEqual(sum(hit["id"] == "G5-迁移版本列举" for hit in data["hits"]), 1)
 
+    def test_supplement_density(self) -> None:
+        green = "# 01\n" + "\n".join(f"正文第 {i} 行，说明过程与结果。" for i in range(50)) \
+            + "\n> **异常情况**：<内容>\n" + "\n".join(f"正文第 {i} 行。" for i in range(10)) + "\n> **并发情况**：<内容>\n"
+        data = self.scan(green)
+        self.assertNotIn("G5-补充块过密", {hit["id"] for hit in data["hits"]})
+        self.assertEqual(data["supplement_blocks"]["count"], 2)
+        red = "# 01\n> **异常情况**：a\n正文。\n> **并发情况**：b\n正文。\n> **设计取舍**：c\n正文。\n"
+        data = self.scan(red)
+        self.assertIn("G5-补充块过密", {hit["id"] for hit in data["hits"]})
+        self.assertLess(data["supplement_blocks"]["spacing"], 20)
+
+    def test_count_claim_signal(self) -> None:
+        data = self.scan("# 01\n一个请求、两个实例、第 3 步、三步以上、约 5 个，随机数写成 43 个字符。\n")
+        self.assertNotIn("G5-数量声明", {hit["id"] for hit in data["hits"]})
+        data = self.scan("# 01 · 规则\n七条本地规则全部生效；共 2 项要核对；十一个引用非空。\n")
+        claims = [hit for hit in data["hits"] if hit["id"] == "G5-数量声明"]
+        self.assertEqual(len(claims), 3, data)
+
+    def test_figure_legend_signal(self) -> None:
+        good = "# 01\n```mermaid\nflowchart TD\nA[请求] --> B{库存够吗}\nB -- 否 --> C[拒绝]\nB -.-> D[失败出口]\n```\n读图时：菱形是条件分支，虚线是失败出口。\n"
+        data = self.scan(good)
+        self.assertNotIn("G3-图例不符", {hit["id"] for hit in data["hits"]})
+        bad = "# 01\n```mermaid\nflowchart TD\nA[请求] --> B[处理]\nB --> C[完成]\n```\n读图时：菱形是条件分支，虚线是失败出口。\n"
+        data = self.scan(bad)
+        hits = [hit for hit in data["hits"] if hit["id"] == "G3-图例不符"]
+        self.assertEqual(len(hits), 2, data)
+
+    def test_name_density_signal(self) -> None:
+        five = "先读 `Cache.get`，未命中查 `UserDao.find`，回填 `Cache.put`，再看 `TokenService` 与 `SessionStore` 的状态。\n"
+        data = self.scan("# 01\n" + five)
+        self.assertNotIn("G6-名称密集", {hit["id"] for hit in data["hits"]})
+        six = "先读 `Cache.get`，未命中查 `UserDao.find`，回填 `Cache.put`，再看 `TokenService`、`SessionStore` 与 `AuditLog` 的状态。\n"
+        data = self.scan("# 01\n" + six)
+        hits = [hit for hit in data["hits"] if hit["id"] == "G6-名称密集"]
+        self.assertTrue(hits, data)
+        self.assertIn("6", hits[0]["match"])
+        table = "# 01\n| a | b |\n|---|---|\n| `A` | `B` |\n| `C` | `D` |\n| `E` | `F` |\n"
+        data = self.scan(table)
+        self.assertNotIn("G6-名称密集", {hit["id"] for hit in data["hits"]})
+        self.assertEqual(data["name_density"]["names"], 0)
+
+    def test_negative_constraint_signal(self) -> None:
+        base = "# 01\n" + "".join(f"不能据此断言第 {i} 种情况。\n" for i in range(6))
+        data = self.scan(base)
+        self.assertNotIn("G6-否定限定", {hit["id"] for hit in data["hits"]})
+        self.assertEqual(data["negative_constraints"]["count"], 6)
+        over = base + "不应把它理解为新的保证。\n"
+        data = self.scan(over)
+        self.assertIn("G6-否定限定", {hit["id"] for hit in data["hits"]})
+        self.assertEqual(data["negative_constraints"]["count"], 7)
+        self.assertTrue(any("合计 7 处" in hit["match"] for hit in data["hits"]))
+
+    def test_long_parallel_sentence_signal(self) -> None:
+        data = self.scan("# 01\n" + "甲" * 130 + "。\n")
+        self.assertNotIn("G6-长并列句", {hit["id"] for hit in data["hits"]})
+        data = self.scan("# 01\n甲、乙、丙、丁、戊。\n")
+        self.assertNotIn("G6-长并列句", {hit["id"] for hit in data["hits"]})
+        data = self.scan("# 01\n" + "甲" * 130 + "、乙、丙、丁。\n")
+        self.assertIn("G6-长并列句", {hit["id"] for hit in data["hits"]})
+
+
+class Skeleton(Base):
+    def make_note(self) -> Path:
+        f = self.tmp / "01-下单.md"
+        write(f, """
+            # 01 · 订单创建
+
+            > 本篇回答：请求怎样变成待支付订单？
+            > 前置与关联：无。
+
+            用户提交订单后，系统留下一条待支付订单。
+
+            ## 一、全貌
+
+            全貌第一段：参与方、阶段与产物。
+
+            全貌第二段：全貌整节都进入骨架。
+
+            ## 二、接收请求
+
+            第二节第一段。
+
+            第二节第二段，不应出现在骨架里。
+
+            ### 2.1 校验
+
+            校验第一段。
+
+            #### 2.1.1 细节
+
+            深层第一段。
+
+            ##### 2.1.1.1 更深
+
+            更深的内容不应出现。
+
+            ## 本篇小结
+
+            小结第一段。
+
+            ## 代码地图
+
+            | 文件 | 职责 |
+            |---|---|
+            | `src/a.py` | 下单 |
+            """)
+        return f
+
+    def test_scope(self) -> None:
+        f = self.make_note()
+        r = run("skeleton", "--file", str(f), "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        data = json.loads(r.stdout)
+        skeleton = data["skeleton"]
+        self.assertIn("# 01 · 订单创建", skeleton)
+        self.assertIn("本篇回答", skeleton)
+        self.assertIn("全貌第一段", skeleton)
+        self.assertIn("全貌第二段", skeleton)
+        self.assertIn("## 二、接收请求", skeleton)
+        self.assertIn("第二节第一段", skeleton)
+        self.assertNotIn("第二节第二段", skeleton)
+        self.assertIn("### 2.1 校验", skeleton)
+        self.assertIn("校验第一段", skeleton)
+        self.assertIn("#### 2.1.1 细节", skeleton)
+        self.assertIn("深层第一段", skeleton)
+        self.assertNotIn("更深的内容不应出现", skeleton)
+        self.assertIn("## 本篇小结", skeleton)
+        self.assertIn("## 代码地图", skeleton)
+        self.assertNotIn("src/a.py", skeleton)
+        self.assertTrue(any(h["title"] == "一、全貌" for h in data["headings"]))
+        self.assertEqual(data["figures"], [])
+
+    def test_out_and_refuse_same_path(self) -> None:
+        f = self.make_note()
+        out = self.tmp / "骨架.md"
+        r = run("skeleton", "--file", str(f), "--out", str(out))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("骨架视图", out.read_text(encoding="utf-8"))
+        r = run("skeleton", "--file", str(f), "--out", str(f))
+        self.assertEqual(r.returncode, 2)
+        r = run("skeleton", "--file", str(self.tmp / "没有.md"))
+        self.assertEqual(r.returncode, 2)
+
+
+class EvalFixtures(unittest.TestCase):
+    """长期夹具与脚本的对接：夹具里植入的问题，脚本能定位到的部分要一直能定位到。"""
+
+    T5 = Path(__file__).resolve().parent / "evals" / "1.6-t5-质量门负例"
+    T6 = Path(__file__).resolve().parent / "evals" / "1.6-t6-修改回归"
+
+    def test_fixture_files_exist(self) -> None:
+        for rel in ["README.md", "判定要点.md", "追问.md", "source/booking.py", "负例1-独立操作排进主链.md",
+                    "负例2-图后文字与图形不符.md", "负例3-结论只在补充块.md"]:
+            self.assertTrue((self.T5 / rel).is_file(), rel)
+        for rel in ["README.md", "判定要点.md", "01-订单创建.md", "_研读-01.md", "修改已有笔记-demo.md"]:
+            self.assertTrue((self.T6 / rel).is_file(), rel)
+        self.assertTrue((self.T6.parent / "t7-审读核实后修正" / "source" / "order.py").is_file(), "T6 沿用的源码夹具")
+
+    def test_t5_legend_mismatch_is_reported(self) -> None:
+        r = run("lint", "--file", str(self.T5 / "负例2-图后文字与图形不符.md"), "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        hits = [hit for hit in json.loads(r.stdout)["hits"] if hit["id"] == "G3-图例不符"]
+        self.assertEqual(len(hits), 2, hits)
+
+    def test_t5_skeleton_shows_only_what_stage_a_reader_gets(self) -> None:
+        r = run("skeleton", "--file", str(self.T5 / "负例1-独立操作排进主链.md"), "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        skeleton = json.loads(r.stdout)["skeleton"]
+        for step in ["第四步：取消预订", "第五步：签到", "第六步：定时释放"]:
+            self.assertIn(step, skeleton)
+        self.assertNotIn("再查发现冲突时", skeleton, "各节第二段起的机制讲解不进入骨架视图")
+
+    def test_t5_source_facts_used_by_the_verdicts(self) -> None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("booking_fixture", self.T5 / "source" / "booking.py")
+        booking = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(booking)
+        saved = []
+        result = booking.submit_booking("u", "r", "s", find_conflict=lambda *a, **k: False,
+                                        save=lambda *a, **k: saved.append(k["state"]) or 7,
+                                        notify_admin=lambda *a: None, notify_user=lambda *a: None)
+        self.assertEqual((result["status"], result["state"], saved), (202, "PENDING_APPROVAL", ["PENDING_APPROVAL"]),
+                         "默认配置下提交后停在待审批")
+        self.assertEqual(booking.submit_booking("u", "r", "s", find_conflict=lambda *a, **k: True, save=None,
+                                                notify_admin=None, notify_user=None)["status"], 409)
+
+    def test_t6_figure_draws_a_later_request_as_next_step(self) -> None:
+        text = (self.T6 / "01-订单创建.md").read_text(encoding="utf-8")
+        self.assertIn("--> F[查询订单状态]", text, "夹具应保留被反馈的图")
+        feedback = (self.T6 / "修改已有笔记-demo.md").read_text(encoding="utf-8")
+        self.assertEqual(feedback.count("| 待处理 |"), 3)
+
 
 class RenderRevise(NotesFixture):
     def test_render_and_preserve_user_append(self) -> None:
@@ -536,6 +822,9 @@ class RenderRevise(NotesFixture):
         self.assertIn("abc1234def", text)
         self.assertIn("七问", text)
         self.assertIn("面试", text)
+        self.assertIn("规则版本：ruan-project2doc 1.6.0", text)
+        self.assertIn("讲述方案", text, "固定规范区应带上组织与讲述方案的要求")
+        self.assertIn("缺口层级", text)
         for heading in ["固定规范区", "项目口径区", "用户追加区", "变更记录"]:
             self.assertIn(heading, text)
         target.write_text(text + "\n用户新要求：补讲失败情形。\n", encoding="utf-8")
