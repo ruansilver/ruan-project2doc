@@ -1,0 +1,48 @@
+{
+ "artifact": {
+  "files": 25,
+  "artifact_sha256": "3f6d6fec5789b2d4143dae81bf351d73f610069f78ff3133d1da7ce417da9c3b",
+  "release_sha256": "3f6d6fec5789b2d4143dae81bf351d73f610069f78ff3133d1da7ce417da9c3b"
+ },
+ "targets": {
+  "claude": {
+   "path": "C:\\Users\\17144\\.claude\\skills\\ruan-project2doc",
+   "old_version": "1.5.0",
+   "old_files": 25,
+   "backup": "D:\\AI workspace\\program\\ruan-project2doc\\design\\evidence\\1.6.0-验收\\本机留档（不入库）\\安装备份-1.5.0\\claude",
+   "old_artifact_sha256": "12cc4ec8c0803b3b19bf17444f365f110bce22b97b27c21f665f1d9abd4b2a96",
+   "new_version": "1.6.0",
+   "new_files": 25,
+   "identical_to_artifact": true,
+   "artifact_sha256": "3f6d6fec5789b2d4143dae81bf351d73f610069f78ff3133d1da7ce417da9c3b",
+   "junk": [],
+   "ok": true
+  },
+  "codex": {
+   "path": "C:\\Users\\17144\\.codex\\skills\\ruan-project2doc",
+   "old_version": "1.5.0",
+   "old_files": 25,
+   "backup": "D:\\AI workspace\\program\\ruan-project2doc\\design\\evidence\\1.6.0-验收\\本机留档（不入库）\\安装备份-1.5.0\\codex",
+   "old_artifact_sha256": "12cc4ec8c0803b3b19bf17444f365f110bce22b97b27c21f665f1d9abd4b2a96",
+   "new_version": "1.6.0",
+   "new_files": 25,
+   "identical_to_artifact": true,
+   "artifact_sha256": "3f6d6fec5789b2d4143dae81bf351d73f610069f78ff3133d1da7ce417da9c3b",
+   "junk": [],
+   "ok": true
+  },
+  "agents": {
+   "path": "C:\\Users\\17144\\.agents\\skills\\ruan-project2doc",
+   "old_version": "1.5.0",
+   "old_files": 25,
+   "backup": "D:\\AI workspace\\program\\ruan-project2doc\\design\\evidence\\1.6.0-验收\\本机留档（不入库）\\安装备份-1.5.0\\agents",
+   "old_artifact_sha256": "12cc4ec8c0803b3b19bf17444f365f110bce22b97b27c21f665f1d9abd4b2a96",
+   "new_version": "1.6.0",
+   "new_files": 25,
+   "identical_to_artifact": true,
+   "artifact_sha256": "3f6d6fec5789b2d4143dae81bf351d73f610069f78ff3133d1da7ce417da9c3b",
+   "junk": [],
+   "ok": true
+  }
+ }
+}

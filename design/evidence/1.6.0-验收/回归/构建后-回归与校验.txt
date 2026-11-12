@@ -1,0 +1,39 @@
+### 全部回归（构建后）
+..................................................
+----------------------------------------------------------------------
+Ran 50 tests in 29.601s
+
+OK
+
+### test_release 单独运行
+test_artifact_hash (test_release.Release.test_artifact_hash) ... ok
+test_design_hash (test_release.Release.test_design_hash) ... ok
+test_no_dev_files_in_artifact (test_release.Release.test_no_dev_files_in_artifact) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.023s
+
+OK
+
+### install 与 src 逐字节比较（diff -r，无输出即一致）
+一致
+
+### 成品内的开发文件（应为空）
+（检查结束）
+
+### Skill 校验（install 成品）
+Skill is valid!
+
+### 成品脚本版本与只读回读校验
+ruan-project2doc 1.6.0
+{
+ "release": {
+  "version": "1.6.0",
+  "design_document": "design/versions/1.6.0.md",
+  "skill_name": "ruan-project2doc",
+  "design_sha256": "fe32296eb69ecafd458b6786ab1c0ccde914fa96701ca260f1a636fab8f7c5e3",
+  "artifact_sha256": "3f6d6fec5789b2d4143dae81bf351d73f610069f78ff3133d1da7ce417da9c3b"
+ },
+ "problems": []
+}
+回读校验退出码 0

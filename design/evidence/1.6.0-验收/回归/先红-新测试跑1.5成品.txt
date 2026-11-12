@@ -1,0 +1,18 @@
+新测试（src/tests/test_project2doc.py）跑 1.5 成品脚本与规则的结果
+退出码 1；FAILED (failures=10, errors=4)
+
+失败与错误的用例：
+- test_rules_version_reported (test_project2doc.Consistency.test_rules_version_reported)
+- test_negative_constraint_signal (test_project2doc.Lint.test_negative_constraint_signal)
+- test_supplement_density (test_project2doc.Lint.test_supplement_density)
+- test_rules_version_written_to_new_files_only (test_project2doc.Scaffold.test_rules_version_written_to_new_files_only)
+- test_narrative_plan_required_and_not_placeholder (test_project2doc.Consistency.test_narrative_plan_required_and_not_placeholder)
+- test_review_requires_three_stage_blocks (test_project2doc.Consistency.test_review_requires_three_stage_blocks)
+- test_count_claim_signal (test_project2doc.Lint.test_count_claim_signal)
+- test_figure_legend_signal (test_project2doc.Lint.test_figure_legend_signal)
+- test_long_parallel_sentence_signal (test_project2doc.Lint.test_long_parallel_sentence_signal)
+- test_name_density_signal (test_project2doc.Lint.test_name_density_signal)
+- test_render_and_preserve_user_append (test_project2doc.RenderRevise.test_render_and_preserve_user_append)
+- test_out_and_refuse_same_path (test_project2doc.Skeleton.test_out_and_refuse_same_path)
+- test_scope (test_project2doc.Skeleton.test_scope)
+- test_frontmatter_and_resources (test_project2doc.SkillLayout.test_frontmatter_and_resources)

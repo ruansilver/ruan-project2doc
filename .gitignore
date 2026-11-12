@@ -1,4 +1,6 @@
 src/.work/
+# 验收时的本机留档（真实项目样篇、旧安装备份）：只在本机保留，不提交、不推送。
+design/evidence/*/本机留档*/
 __pycache__/
 *.pyc
 .env

@@ -1,0 +1,40 @@
+### C:/Users/17144/.claude/skills/ruan-project2doc
+diff -r：与成品逐字节一致
+文件数：25
+  version: "1.6.0"
+脚本版本：ruan-project2doc 1.6.0
+残留开发文件：0 个
+
+### C:/Users/17144/.codex/skills/ruan-project2doc
+diff -r：与成品逐字节一致
+文件数：25
+  version: "1.6.0"
+脚本版本：ruan-project2doc 1.6.0
+残留开发文件：0 个
+
+### C:/Users/17144/.agents/skills/ruan-project2doc
+diff -r：与成品逐字节一致
+文件数：25
+  version: "1.6.0"
+脚本版本：ruan-project2doc 1.6.0
+残留开发文件：0 个
+
+### 同级目录里没有多出来的同名备份
+C:/Users/17144/.claude/skills: ruan-project2doc 
+C:/Users/17144/.codex/skills: ruan-project2doc 
+C:/Users/17144/.agents/skills: ruan-project2doc 
+
+### DSH 校验（.agents 安装处）
+DSH skill validation: C:\Users\17144\.agents\skills\ruan-project2doc\SKILL.md
+  name=ruan-project2doc  description_chars=317  body_lines=91
+  [INFO] location-ok: under a scanned skill root: user-agents (C:\Users\17144\.agents\skills)
+
+PASS - 0 error(s), 0 warning(s)
+
+### 备份（本机留档，不入库）
+claude: 25 个文件，  version: "1.5.0"
+codex: 25 个文件，  version: "1.5.0"
+agents: 25 个文件，  version: "1.5.0"
+
+### 再次只读回读核对
+三处与成品一致性核对退出码 0

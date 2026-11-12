@@ -1,0 +1,21 @@
+### quick_validate.py（src）
+Skill is valid!
+退出码 0
+
+### dsh_validate.py（src）
+DSH skill validation: src\ruan-project2doc\SKILL.md
+  name=ruan-project2doc  description_chars=317  body_lines=91
+  [WARN] location-unscanned: path is not directly under a scanned root (<project>/.dsh/skills, <project>/.agents/skills, C:\Users\17144\.dsh\skills, C:\Users\17144\.agents\skills); DSH will not discover it until it is installed there
+
+PASS - 0 error(s), 1 warning(s)
+退出码 0
+
+### 全部回归（构建前，src 最终状态）
+..................................................
+----------------------------------------------------------------------
+Ran 50 tests in 25.569s
+
+OK
+
+### 脚本版本
+ruan-project2doc 1.6.0
