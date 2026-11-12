@@ -1,7 +1,7 @@
 {
-  "version": "1.5.0",
-  "design_document": "design/versions/1.5.0.md",
+  "version": "1.6.0",
+  "design_document": "design/versions/1.6.0.md",
   "skill_name": "ruan-project2doc",
-  "design_sha256": "c532edf1afb6d0d26e9e10c3fd9e07174a57cc9c4cca80632aeb693eea959636",
-  "artifact_sha256": "12cc4ec8c0803b3b19bf17444f365f110bce22b97b27c21f665f1d9abd4b2a96"
+  "design_sha256": "fe32296eb69ecafd458b6786ab1c0ccde914fa96701ca260f1a636fab8f7c5e3",
+  "artifact_sha256": "3f6d6fec5789b2d4143dae81bf351d73f610069f78ff3133d1da7ce417da9c3b"
 }
